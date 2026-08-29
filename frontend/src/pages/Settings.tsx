@@ -65,9 +65,9 @@ export function SettingsPage() {
             <input
               className="range"
               type="range"
-              min={15}
+              min={2}
               max={600}
-              step={15}
+              step={1}
               value={interval}
               onChange={(e) => setIntervalSec(Number(e.target.value))}
             />

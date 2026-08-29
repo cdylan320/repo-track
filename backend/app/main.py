@@ -51,7 +51,7 @@ async def lifespan(_: FastAPI):
     try:
         row = db.get(AppMeta, "poll_interval_seconds")
         if row and row.value.isdigit():
-            settings.poll_interval_seconds = max(15, int(row.value))
+            settings.poll_interval_seconds = max(2, int(row.value))
         keep = {row.id for row in db.query(Account.id).all()}
     finally:
         db.close()

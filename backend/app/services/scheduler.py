@@ -25,7 +25,7 @@ def start() -> None:
     scheduler.add_job(
         _tick,
         "interval",
-        seconds=max(15, settings.poll_interval_seconds),
+        seconds=max(2, settings.poll_interval_seconds),
         id="relay-poll",
         replace_existing=True,
         next_run_time=datetime.now(timezone.utc) + timedelta(seconds=8),
@@ -37,9 +37,10 @@ def start() -> None:
 
 
 def reschedule(seconds: int) -> None:
+    seconds = max(2, min(3600, seconds))
     settings.poll_interval_seconds = seconds
     if scheduler.running and scheduler.get_job("relay-poll"):
-        scheduler.reschedule_job("relay-poll", trigger="interval", seconds=max(15, seconds))
+        scheduler.reschedule_job("relay-poll", trigger="interval", seconds=seconds)
     git_sync.set_next_tick(datetime.now(timezone.utc) + timedelta(seconds=seconds))
 
 

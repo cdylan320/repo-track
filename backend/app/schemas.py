@@ -161,7 +161,7 @@ class SettingsOut(BaseModel):
 
 
 class SettingsUpdate(BaseModel):
-    poll_interval_seconds: int | None = Field(default=None, ge=15, le=3600)
+    poll_interval_seconds: int | None = Field(default=None, ge=2, le=3600)
 
 
 class DiscordTestResult(BaseModel):
