@@ -138,7 +138,7 @@ def tip_sha(owner: str, name: str, branch: str) -> str:
         return ""
 
 
-def ensure_dest_repo(name: str, private: bool, description: str) -> None:
+def ensure_dest_repo(name: str, private: bool, description: str = "") -> None:
     if not settings.dest_token:
         raise GithubError("DEST_GITHUB_TOKEN is not set")
     if not settings.dest_account:
@@ -146,15 +146,22 @@ def ensure_dest_repo(name: str, private: bool, description: str) -> None:
     payload = {
         "name": name,
         "private": private,
-        "description": description or f"Relay of {name}",
         "has_issues": False,
         "has_projects": False,
         "has_wiki": False,
         "auto_init": False,
     }
+    if description:
+        payload["description"] = description
     with httpx.Client(timeout=30, headers=_headers(settings.dest_token), follow_redirects=True) as client:
         existing = client.get(f"{API}/repos/{settings.dest_account}/{name}")
         if existing.status_code == 200:
+            current = ((existing.json() or {}).get("description") or "").strip()
+            if current.startswith("Relay of "):
+                client.patch(
+                    f"{API}/repos/{settings.dest_account}/{name}",
+                    json={"description": description},
+                )
             return
         profile = client.get(f"{API}/users/{settings.dest_account}")
         kind = "User"
@@ -170,3 +177,31 @@ def ensure_dest_repo(name: str, private: bool, description: str) -> None:
             if any("already exists" in str(e).lower() for e in errors) or "already exists" in str(body).lower():
                 return
         raise GithubError(_err(created))
+
+
+def scrub_relay_descriptions() -> None:
+    if not settings.dest_token or not settings.dest_account:
+        return
+    with httpx.Client(timeout=30, headers=_headers(settings.dest_token), follow_redirects=True) as client:
+        profile = client.get(f"{API}/users/{settings.dest_account}")
+        kind = "User"
+        if profile.status_code == 200:
+            kind = (profile.json() or {}).get("type") or "User"
+        url = (
+            f"{API}/orgs/{settings.dest_account}/repos?per_page=100&type=all"
+            if kind == "Organization"
+            else f"{API}/user/repos?per_page=100&affiliation=owner"
+        )
+        while url:
+            response = client.get(url)
+            if response.status_code >= 400:
+                raise GithubError(_err(response))
+            chunk = response.json()
+            if not isinstance(chunk, list):
+                break
+            for item in chunk:
+                desc = (item.get("description") or "").strip()
+                name = item.get("name") or ""
+                if name and desc.startswith("Relay of "):
+                    client.patch(f"{API}/repos/{settings.dest_account}/{name}", json={"description": ""})
+            url = _next_link(response.headers.get("link"))

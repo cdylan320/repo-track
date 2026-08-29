@@ -89,6 +89,7 @@ class AccountOut(BaseModel):
 
 
 class CommitOut(BaseModel):
+    kind: str = "commit"
     id: int
     account_id: int
     repo_id: int

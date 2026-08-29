@@ -963,6 +963,14 @@ button {
   color: var(--live);
 }
 
+.commit .kind {
+  padding-top: 2px;
+}
+
+.commit .kind.new-repo + div .msg {
+  white-space: normal;
+}
+
 .mobile-nav {
   display: none;
   border-bottom: 1px solid var(--line);

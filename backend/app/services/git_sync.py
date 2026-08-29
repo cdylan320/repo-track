@@ -24,6 +24,7 @@ _locks: dict[int, asyncio.Lock] = {}
 _cancel: set[int] = set()
 _running = False
 _next_tick: datetime | None = None
+_scrubbed_descriptions = False
 
 
 def is_running() -> bool:
@@ -228,11 +229,7 @@ def _baseline_repo(account: Account, repo: Repo, remote: dict) -> None:
 
 
 def _open_new_repo(account: Account, repo: Repo, remote: dict) -> str:
-    github.ensure_dest_repo(
-        repo.name,
-        repo.private,
-        f"Relay of {account.origin_account}/{repo.name}",
-    )
+    github.ensure_dest_repo(repo.name, repo.private, remote.get("description") or "")
     repo.mirrored = True
     repo.pushed_at = remote.get("pushed_at") or ""
     if remote.get("empty"):
@@ -261,11 +258,7 @@ def _open_new_repo(account: Account, repo: Repo, remote: dict) -> str:
 
 
 def _relay_new_commits(account: Account, repo: Repo, remote: dict) -> tuple[list[dict], str]:
-    github.ensure_dest_repo(
-        repo.name,
-        repo.private,
-        f"Relay of {account.origin_account}/{repo.name}",
-    )
+    github.ensure_dest_repo(repo.name, repo.private, remote.get("description") or "")
     _ensure_clone(account, repo)
     code, _, err = _git(repo, ["fetch", "origin", "--prune"])
     if code != 0:
@@ -331,6 +324,7 @@ def _upsert_repo(db: Session, account: Account, remote: dict) -> tuple[Repo, boo
 
 
 def sync_account_now(db: Session, account: Account) -> dict:
+    global _scrubbed_descriptions
     account.status = "syncing"
     account.last_error = ""
     db.commit()
@@ -343,6 +337,12 @@ def sync_account_now(db: Session, account: Account) -> dict:
 
     first_account = True
     try:
+        if not _scrubbed_descriptions:
+            try:
+                github.scrub_relay_descriptions()
+                _scrubbed_descriptions = True
+            except Exception:
+                log.exception("could not clear dest repo descriptions")
         first_account = db.query(Repo).filter(Repo.account_id == account.id).count() == 0
         remotes = github.list_repos(account.origin_account, account.origin_kind, account.include_forks)
         for remote in remotes:

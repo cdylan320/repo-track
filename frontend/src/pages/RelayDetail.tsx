@@ -154,7 +154,7 @@ export function RelayDetailPage() {
               ))
             )}
             <div className="panel-h" style={{ borderTop: '1px solid var(--line)' }}>
-              Commits
+              Activity
             </div>
             <CommitFeed items={commits} />
           </section>

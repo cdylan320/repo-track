@@ -157,7 +157,7 @@ export function OverviewPage() {
           </section>
           <section className="panel">
             <div className="panel-h">
-              Latest commits
+              Latest activity
               <Link to="/activity">Activity</Link>
             </div>
             <CommitFeed items={activity.slice(0, 12)} toPair />

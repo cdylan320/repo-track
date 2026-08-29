@@ -42,6 +42,7 @@ export type AccountDraft = {
 }
 
 export type CommitItem = {
+  kind?: 'commit' | 'new-repo'
   id: number
   account_id: number
   repo_id: number

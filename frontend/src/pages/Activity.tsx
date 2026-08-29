@@ -12,7 +12,7 @@ export function ActivityPage() {
         <div className="page-head">
           <div>
             <h1 className="display">What moved.</h1>
-            <p className="lede">Commits Relay pushed after the baseline. New repos show up in the account log.</p>
+            <p className="lede">New dest repos and commits Relay pushed after the baseline.</p>
           </div>
         </div>
         <div className="timeline panel">

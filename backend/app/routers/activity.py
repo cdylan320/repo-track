@@ -23,6 +23,7 @@ def commit_out(commit: Commit, account: Account | None, repo: Repo | None) -> Co
     origin = account.origin_account if account else ""
     repo_name = repo.name if repo else ""
     return CommitOut(
+        kind="commit",
         id=commit.id,
         account_id=commit.account_id,
         repo_id=commit.repo_id,
@@ -37,6 +38,33 @@ def commit_out(commit: Commit, account: Account | None, repo: Repo | None) -> Co
         deletions=commit.deletions,
         files_list=commit.files_list or "",
         synced_at=commit.synced_at,
+        origin_label=f"{origin}/{repo_name}" if origin and repo_name else origin,
+        dest_label=f"{dest}/{repo_name}" if dest and repo_name else dest,
+        repo_name=repo_name,
+        account_name=account.name if account else "",
+    )
+
+
+def new_repo_out(event: Event, account: Account | None, repo: Repo | None) -> CommitOut:
+    dest = settings.dest_account
+    origin = account.origin_account if account else ""
+    repo_name = repo.name if repo else ""
+    return CommitOut(
+        kind="new-repo",
+        id=event.id,
+        account_id=event.account_id or 0,
+        repo_id=event.repo_id or 0,
+        sha="",
+        short_sha="new",
+        message=event.message,
+        author_name="",
+        author_email="",
+        authored_at=event.created_at,
+        files_changed=0,
+        insertions=0,
+        deletions=0,
+        files_list="",
+        synced_at=event.created_at,
         origin_label=f"{origin}/{repo_name}" if origin and repo_name else origin,
         dest_label=f"{dest}/{repo_name}" if dest and repo_name else dest,
         repo_name=repo_name,
@@ -75,6 +103,14 @@ def overview(db: Session = Depends(get_db)):
     )
 
 
+def _sort_ts(value: datetime | None) -> datetime:
+    if value is None:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
 @router.get("/activity", response_model=list[CommitOut])
 def activity(
     account_id: int | None = None,
@@ -82,16 +118,27 @@ def activity(
     limit: int = Query(80, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
-    query = db.query(Commit).order_by(Commit.synced_at.desc(), Commit.id.desc())
+    commit_q = db.query(Commit).order_by(Commit.synced_at.desc(), Commit.id.desc())
+    event_q = db.query(Event).filter(Event.kind == "new-repo").order_by(Event.created_at.desc(), Event.id.desc())
     track_id = account_id or pair_id
     if track_id is not None:
-        query = query.filter(Commit.account_id == track_id)
-    rows = query.limit(limit).all()
-    acc_ids = {row.account_id for row in rows}
-    repo_ids = {row.repo_id for row in rows}
+        commit_q = commit_q.filter(Commit.account_id == track_id)
+        event_q = event_q.filter(Event.account_id == track_id)
+    commits = commit_q.limit(limit).all()
+    events = event_q.limit(limit).all()
+    acc_ids = {row.account_id for row in commits} | {row.account_id for row in events if row.account_id}
+    repo_ids = {row.repo_id for row in commits} | {row.repo_id for row in events if row.repo_id}
     accounts = {a.id: a for a in db.query(Account).filter(Account.id.in_(acc_ids)).all()} if acc_ids else {}
     repos = {r.id: r for r in db.query(Repo).filter(Repo.id.in_(repo_ids)).all()} if repo_ids else {}
-    return [commit_out(row, accounts.get(row.account_id), repos.get(row.repo_id)) for row in rows]
+    items: list[tuple[datetime, int, str, CommitOut]] = []
+    for row in commits:
+        out = commit_out(row, accounts.get(row.account_id), repos.get(row.repo_id))
+        items.append((row.synced_at, row.id, "commit", out))
+    for row in events:
+        out = new_repo_out(row, accounts.get(row.account_id) if row.account_id else None, repos.get(row.repo_id) if row.repo_id else None)
+        items.append((row.created_at, row.id, "new-repo", out))
+    items.sort(key=lambda item: (_sort_ts(item[0]), item[1]), reverse=True)
+    return [item[3] for item in items[:limit]]
 
 
 @router.get("/logs", response_model=list[EventOut])
