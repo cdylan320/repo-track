@@ -61,7 +61,10 @@ export function SettingsPage() {
         <div className="settings-grid">
           <section className="block">
             <h3>Poll interval</h3>
-            <p>Dest only receives new origin repos and new commits. Idle repos stay off dest.</p>
+            <p>
+              Every poll checks <strong>all</strong> origin accounts in parallel. Dest token is used only to create/push
+              dest repos — origin change detection is public GitHub (or optional GITHUB_TOKEN for private origin).
+            </p>
             <input
               className="range"
               type="range"
@@ -72,7 +75,7 @@ export function SettingsPage() {
               onChange={(e) => setIntervalSec(Number(e.target.value))}
             />
             <div className="sub" style={{ marginBottom: 16 }}>
-              Every <span className="mono">{interval}s</span>
+              Every <span className="mono">{interval}s</span> for every origin
             </div>
             <button className="btn btn-signal" type="button" onClick={save} disabled={saving}>
               {saving ? 'Saving…' : 'Save interval'}

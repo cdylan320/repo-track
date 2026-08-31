@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -200,16 +201,106 @@ def _checkout_branch(repo: Repo) -> None:
     raise RuntimeError(_clean_err(err) or f"branch '{branch}' not found on origin")
 
 
+def _rewrite_stream(src, out, name: bytes, email: bytes, dest_ref: bytes) -> None:
+    """Copy a fast-export stream, re-stamping author/committer as the dest account.
+
+    Dates are kept as-is so the rewrite is deterministic: the same origin history
+    always produces the same dest SHAs, which keeps ff-only pushes working.
+    """
+    while True:
+        line = src.readline()
+        if not line:
+            return
+        if line.startswith(b"data "):
+            out.write(line)
+            size = int(line[5:].strip() or b"0")
+            while size > 0:
+                chunk = src.read(min(size, 1 << 20))
+                if not chunk:
+                    return
+                out.write(chunk)
+                size -= len(chunk)
+            continue
+        if line.startswith((b"commit ", b"reset ")):
+            keyword = line.split(b" ", 1)[0]
+            out.write(keyword + b" " + dest_ref + b"\n")
+            continue
+        if line.startswith((b"author ", b"committer ", b"tagger ")):
+            keyword, _, rest = line.rstrip(b"\n").partition(b" ")
+            _ident, sep, when = rest.rpartition(b"> ")
+            if sep:
+                out.write(keyword + b" " + name + b" <" + email + b"> " + when + b"\n")
+                continue
+        out.write(line)
+
+
+def _reauthor(repo: Repo, dest_ref: str) -> None:
+    """Rebuild HEAD's history under dest_ref with the dest account as author."""
+    name, email = github.dest_identity()
+    folder = clone_dir(repo.account_id, repo.name)
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = "echo"
+    with tempfile.TemporaryFile() as export_err, tempfile.TemporaryFile() as import_err:
+        exporter = subprocess.Popen(
+            ["git", "fast-export", "--reencode=yes", "--signed-tags=strip", "HEAD"],
+            cwd=str(folder),
+            stdout=subprocess.PIPE,
+            stderr=export_err,
+            env=env,
+        )
+        importer = subprocess.Popen(
+            ["git", "fast-import", "--quiet", "--force"],
+            cwd=str(folder),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=import_err,
+            env=env,
+        )
+        try:
+            _rewrite_stream(
+                exporter.stdout,
+                importer.stdin,
+                name.encode("utf-8", "replace"),
+                email.encode("utf-8", "replace"),
+                dest_ref.encode(),
+            )
+        finally:
+            if importer.stdin:
+                importer.stdin.close()
+            if exporter.stdout:
+                exporter.stdout.close()
+            exporter.wait(timeout=settings.git_timeout_seconds)
+            importer.wait(timeout=settings.git_timeout_seconds)
+        if exporter.returncode != 0 or importer.returncode != 0:
+            failed = "fast-export" if exporter.returncode != 0 else "fast-import"
+            handle = export_err if exporter.returncode != 0 else import_err
+            handle.seek(0)
+            detail = _clean_err(handle.read().decode("utf-8", "replace").strip())
+            raise RuntimeError(detail or f"git {failed} failed")
+
+
+def _non_fast_forward(err: str) -> bool:
+    text = (err or "").lower()
+    return "non-fast-forward" in text or "fetch first" in text or "updates were rejected" in text
+
+
 def _push_dest(account: Account, repo: Repo) -> None:
     branch = repo.default_branch or "main"
-    refspec = f"HEAD:refs/heads/{branch}"
-    if account.sync_mode == "force":
-        args = ["push", "--force", "dest", refspec]
-    else:
-        args = ["push", "dest", refspec]
+    dest_ref = f"refs/heads/relay-dest/{branch}"
+    _reauthor(repo, dest_ref)
+    refspec = f"{dest_ref}:refs/heads/{branch}"
+    forced = account.sync_mode == "force"
+    args = ["push", "--force", "dest", refspec] if forced else ["push", "dest", refspec]
     code, _, err = _git(repo, args)
+    if code != 0 and not forced and _non_fast_forward(err):
+        # Re-authored history diverges from whatever was mirrored before it, so
+        # the first push after the switch has to replace the dest branch.
+        log.warning("dest branch %s/%s diverged — force pushing re-authored history", repo.account_id, repo.name)
+        code, _, err = _git(repo, ["push", "--force", "dest", refspec])
     if code != 0:
         raise RuntimeError(_clean_err(err) or "git push dest failed")
+    repo.reauthored = True
 
 
 def _is_sha(value: str) -> bool:
@@ -255,6 +346,24 @@ def _open_new_repo(account: Account, repo: Repo, remote: dict) -> str:
     repo.last_error = ""
     repo.last_sync_at = utcnow()
     return tip
+
+
+def _reauthor_dest(account: Account, repo: Repo, remote: dict) -> None:
+    """Re-push an already-mirrored repo so its dest history carries dest authorship."""
+    github.ensure_dest_repo(repo.name, repo.private, remote.get("description") or "")
+    _ensure_clone(account, repo)
+    code, _, err = _git(repo, ["fetch", "origin", "--prune"])
+    if code != 0:
+        raise RuntimeError(_clean_err(err) or "git fetch origin failed")
+    _checkout_branch(repo)
+    code, tip, _err = _git(repo, ["rev-parse", "HEAD"])
+    if code != 0 or not tip:
+        repo.reauthored = True
+        return
+    _push_dest(account, repo)
+    repo.status = "idle"
+    repo.last_error = ""
+    repo.last_sync_at = utcnow()
 
 
 def _relay_new_commits(account: Account, repo: Repo, remote: dict) -> tuple[list[dict], str]:
@@ -377,6 +486,18 @@ def sync_account_now(db: Session, account: Account) -> dict:
                     continue
 
                 remote_pushed = remote.get("pushed_at") or ""
+                if repo.mirrored and not repo.reauthored:
+                    repo.status = "syncing"
+                    db.commit()
+                    _reauthor_dest(account, repo, remote)
+                    _record_event(
+                        db,
+                        account,
+                        "sync",
+                        f"Re-authored {repo.name} as {settings.dest_account}",
+                        repo=repo,
+                    )
+                    db.commit()
                 if repo.last_sha and not repo.pushed_at:
                     repo.pushed_at = remote_pushed
                     repo.status = "idle"
@@ -411,6 +532,8 @@ def sync_account_now(db: Session, account: Account) -> dict:
                         {"name": repo.name, "branch": repo.default_branch, "commits": stored}
                     )
                     stored_total += len(stored)
+            except github.GithubRateLimit:
+                raise
             except Exception as exc:  # noqa: BLE001
                 repo.status = "error"
                 repo.last_error = str(exc)
@@ -461,6 +584,22 @@ def sync_account_now(db: Session, account: Account) -> dict:
             "repo_count": len(remotes),
             "errors": errors,
         }
+    except github.GithubRateLimit:
+        live = db.get(Account, account.id)
+        if live:
+            live.status = "idle"
+            live.last_error = "GitHub rate limit — polling paused until reset"
+            db.commit()
+        return {
+            "ok": True,
+            "first": first_account,
+            "new_repos": [],
+            "commit_groups": [],
+            "count": 0,
+            "repo_count": 0,
+            "errors": [],
+            "rate_limited": True,
+        }
     except Exception as exc:  # noqa: BLE001
         live = db.get(Account, account.id)
         if not live:
@@ -510,7 +649,7 @@ async def run_account(account_id: int) -> dict:
             if not account:
                 return {"ok": True, "count": 0}
             await bus.publish("account", {"id": account.id, "status": account.status})
-            if not cancelled(account_id):
+            if not cancelled(account_id) and not result.get("rate_limited"):
                 await discord.notify_digest(account, result)
             if result.get("count") or result.get("new_repos"):
                 await bus.publish("commits", {"account_id": account.id, "count": result.get("count", 0)})
@@ -525,16 +664,21 @@ async def run_account(account_id: int) -> dict:
 
 
 async def run_due_accounts() -> None:
+    if github.is_blocked("origin"):
+        return
     db = SessionLocal()
     try:
-        ids = [row.id for row in db.query(Account).filter(Account.paused.is_(False)).all()]
+        ids = [row.id for row in db.query(Account).filter(Account.paused.is_(False)).order_by(Account.id.asc()).all()]
     finally:
         db.close()
-    for account_id in ids:
-        try:
-            await run_account(account_id)
-        except Exception:
-            log.exception("account %s crashed", account_id)
+    if not ids:
+        return
+    results = await asyncio.gather(*[run_account(account_id) for account_id in ids], return_exceptions=True)
+    for account_id, result in zip(ids, results):
+        if isinstance(result, github.GithubRateLimit):
+            continue
+        if isinstance(result, Exception):
+            log.error("account %s crashed", account_id, exc_info=result)
 
 
 def wipe_account_clones(account_id: int) -> None:

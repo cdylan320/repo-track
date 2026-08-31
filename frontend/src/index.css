@@ -951,6 +951,21 @@ button {
   margin-top: 6px;
 }
 
+.commit a {
+  color: inherit;
+  border-bottom: 1px solid transparent;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+
+.commit a:hover {
+  color: var(--signal);
+  border-bottom-color: var(--signal);
+}
+
+.commit .msg a.ext {
+  color: var(--ink);
+}
+
 .file-chip {
   font-family: var(--font-mono);
   font-size: 11px;

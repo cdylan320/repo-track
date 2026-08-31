@@ -1,7 +1,17 @@
+import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import type { CommitItem } from '../types'
 import { clockTime, firstLine, relativeTime } from '../format'
 import { useStore } from '../store'
+
+function RepoLink({ href, title, children }: { href: string; title?: string; children: ReactNode }) {
+  if (!href) return <>{children}</>
+  return (
+    <a className="ext" href={href} target="_blank" rel="noreferrer" title={title}>
+      {children}
+    </a>
+  )
+}
 
 export function CommitRow({ item, toPair }: { item: CommitItem; toPair?: boolean }) {
   const { now } = useStore()
@@ -12,9 +22,14 @@ export function CommitRow({ item, toPair }: { item: CommitItem; toPair?: boolean
     .split(', ')
     .filter(Boolean)
     .slice(0, 4)
+  const commitUrl = item.origin_url && item.sha ? `${item.origin_url}/commit/${item.sha}` : ''
   return (
     <div className="commit">
-      <div className="sha">{item.short_sha}</div>
+      <div className="sha">
+        <RepoLink href={commitUrl} title={`Open ${item.short_sha} on origin`}>
+          {item.short_sha}
+        </RepoLink>
+      </div>
       <div>
         <div className="msg">{firstLine(item.message)}</div>
         <div className="sub">
@@ -51,19 +66,62 @@ export function CommitRow({ item, toPair }: { item: CommitItem; toPair?: boolean
             ))}
           </div>
         ) : null}
-        <div className="sub muted">synced {clockTime(item.synced_at)}</div>
+        <div className="sub muted">
+          synced {clockTime(item.synced_at)}
+          <RepoRefs item={item} />
+        </div>
       </div>
     </div>
   )
 }
 
+function RepoRefs({ item }: { item: CommitItem }) {
+  if (!item.origin_url && !item.dest_url) return null
+  return (
+    <>
+      {item.origin_url ? (
+        <>
+          {' · '}
+          <RepoLink href={item.origin_url} title={item.origin_label}>
+            origin ↗
+          </RepoLink>
+        </>
+      ) : null}
+      {item.dest_url ? (
+        <>
+          {' · '}
+          <RepoLink href={item.dest_url} title={item.dest_label}>
+            dest ↗
+          </RepoLink>
+        </>
+      ) : null}
+    </>
+  )
+}
+
 function NewRepoRow({ item, toPair }: { item: CommitItem; toPair?: boolean }) {
   const { now } = useStore()
+  const pair = item.origin_label.includes('/') && item.dest_label.includes('/')
   return (
     <div className="commit">
       <div className="kind new-repo">new-repo</div>
       <div>
-        <div className="msg">{firstLine(item.message)}</div>
+        <div className="msg">
+          {pair ? (
+            <>
+              New repo{' '}
+              <RepoLink href={item.origin_url} title="Open origin repo on GitHub">
+                {item.origin_label}
+              </RepoLink>
+              {' → '}
+              <RepoLink href={item.dest_url} title="Open dest repo on GitHub">
+                {item.dest_label}
+              </RepoLink>
+            </>
+          ) : (
+            firstLine(item.message)
+          )}
+        </div>
         <div className="sub">
           {item.repo_name ? <span className="mono">{item.repo_name} · </span> : null}
           opened on dest · {relativeTime(item.authored_at || item.synced_at, now)}

@@ -60,6 +60,8 @@ export type CommitItem = {
   synced_at: string
   origin_label: string
   dest_label: string
+  origin_url: string
+  dest_url: string
   repo_name: string
   account_name: string
 }
@@ -95,6 +97,8 @@ export type Overview = {
   git_token_configured: boolean
   worker_running: boolean
   next_tick_at: string | null
+  github_paused_until?: string | null
+  github_remaining?: number | null
 }
 
 export type Settings = {

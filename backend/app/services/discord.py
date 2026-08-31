@@ -63,6 +63,8 @@ async def notify_digest(account, result: dict) -> tuple[bool, str]:
     new_repos = result.get("new_repos") or []
     commit_groups: list = result.get("commit_groups") or []
     errors = result.get("errors") or []
+    if errors and all("rate limit" in str(e).lower() for e in errors):
+        return True, "rate-limit quiet"
     repo_count = result.get("repo_count") or 0
 
     if first and not errors:

@@ -39,7 +39,9 @@ export function Shell() {
             poll {overview ? `${overview.poll_interval_seconds}s` : '—'}
           </div>
           <div className="pulse-row">
-            next {countdown(overview?.next_tick_at, now)}
+            {overview?.github_paused_until
+              ? `GitHub pause ${countdown(overview.github_paused_until, now)}`
+              : `next ${countdown(overview?.next_tick_at, now)}`}
           </div>
         </div>
       </aside>

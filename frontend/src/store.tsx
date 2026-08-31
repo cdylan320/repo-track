@@ -70,8 +70,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         try {
           const payload = JSON.parse(message.data) as LiveEvent
           const next = payload.data?.next_tick_at
-          if (typeof next === 'string') {
-            setOverview((cur) => (cur ? { ...cur, next_tick_at: next } : cur))
+          const paused = payload.data?.github_paused_until
+          const remaining = payload.data?.github_remaining
+          if (typeof next === 'string' || typeof paused === 'string' || typeof remaining === 'number') {
+            setOverview((cur) =>
+              cur
+                ? {
+                    ...cur,
+                    ...(typeof next === 'string' ? { next_tick_at: next } : {}),
+                    ...(typeof paused === 'string' ? { github_paused_until: paused } : {}),
+                    ...(typeof remaining === 'number' ? { github_remaining: remaining } : {}),
+                  }
+                : cur,
+            )
           }
           if (payload.event === 'hello' || payload.event === 'tick') return
           void refresh()

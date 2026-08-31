@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from .. import github
 from ..config import settings
 from ..database import get_db
 from ..models import Account, Commit, Event, Repo
@@ -11,6 +12,14 @@ from ..schemas import CommitOut, EventOut, OverviewOut
 from ..services import git_sync
 
 router = APIRouter(prefix="/api", tags=["activity"])
+
+
+def _web_url(clone_url: str, label: str) -> str:
+    """Browser URL for a repo: the stored clone url without .git, else built from owner/name."""
+    url = (clone_url or "").strip()
+    if url:
+        return url[:-4] if url.endswith(".git") else url
+    return f"https://github.com/{label}" if "/" in label else ""
 
 
 def _today_start():
@@ -22,6 +31,8 @@ def commit_out(commit: Commit, account: Account | None, repo: Repo | None) -> Co
     dest = settings.dest_account
     origin = account.origin_account if account else ""
     repo_name = repo.name if repo else ""
+    origin_label = f"{origin}/{repo_name}" if origin and repo_name else origin
+    dest_label = f"{dest}/{repo_name}" if dest and repo_name else dest
     return CommitOut(
         kind="commit",
         id=commit.id,
@@ -38,8 +49,10 @@ def commit_out(commit: Commit, account: Account | None, repo: Repo | None) -> Co
         deletions=commit.deletions,
         files_list=commit.files_list or "",
         synced_at=commit.synced_at,
-        origin_label=f"{origin}/{repo_name}" if origin and repo_name else origin,
-        dest_label=f"{dest}/{repo_name}" if dest and repo_name else dest,
+        origin_label=origin_label,
+        dest_label=dest_label,
+        origin_url=_web_url(repo.origin_url if repo else "", origin_label),
+        dest_url=_web_url(repo.dest_url if repo else "", dest_label),
         repo_name=repo_name,
         account_name=account.name if account else "",
     )
@@ -49,6 +62,8 @@ def new_repo_out(event: Event, account: Account | None, repo: Repo | None) -> Co
     dest = settings.dest_account
     origin = account.origin_account if account else ""
     repo_name = repo.name if repo else ""
+    origin_label = f"{origin}/{repo_name}" if origin and repo_name else origin
+    dest_label = f"{dest}/{repo_name}" if dest and repo_name else dest
     return CommitOut(
         kind="new-repo",
         id=event.id,
@@ -65,8 +80,10 @@ def new_repo_out(event: Event, account: Account | None, repo: Repo | None) -> Co
         deletions=0,
         files_list="",
         synced_at=event.created_at,
-        origin_label=f"{origin}/{repo_name}" if origin and repo_name else origin,
-        dest_label=f"{dest}/{repo_name}" if dest and repo_name else dest,
+        origin_label=origin_label,
+        dest_label=dest_label,
+        origin_url=_web_url(repo.origin_url if repo else "", origin_label),
+        dest_url=_web_url(repo.dest_url if repo else "", dest_label),
         repo_name=repo_name,
         account_name=account.name if account else "",
     )
@@ -100,6 +117,10 @@ def overview(db: Session = Depends(get_db)):
         git_token_configured=bool(settings.dest_token),
         worker_running=git_sync.is_running(),
         next_tick_at=git_sync.next_tick_at(),
+        github_paused_until=(
+            datetime.fromtimestamp(github.reset_at(), tz=timezone.utc) if github.reset_at() else None
+        ),
+        github_remaining=github.remaining(),
     )
 
 

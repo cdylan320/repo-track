@@ -7,6 +7,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from ..config import settings
 from ..events import bus
+from .. import github
 from . import git_sync
 
 log = logging.getLogger("relay.scheduler")
@@ -14,8 +15,32 @@ scheduler = AsyncIOScheduler()
 
 
 async def _tick() -> None:
+    if github.is_blocked():
+        reset = github.reset_at()
+        nxt = (
+            datetime.fromtimestamp(reset, tz=timezone.utc)
+            if reset
+            else datetime.now(timezone.utc) + timedelta(seconds=60)
+        )
+        git_sync.set_next_tick(nxt)
+        await bus.publish(
+            "tick",
+            {
+                "next_tick_at": nxt.isoformat(),
+                "github_paused_until": github.reset_iso(),
+                "github_remaining": github.remaining(),
+            },
+        )
+        return
     git_sync.set_next_tick(datetime.now(timezone.utc) + timedelta(seconds=settings.poll_interval_seconds))
-    await bus.publish("tick", {"next_tick_at": git_sync.next_tick_at().isoformat() if git_sync.next_tick_at() else None})
+    await bus.publish(
+        "tick",
+        {
+            "next_tick_at": git_sync.next_tick_at().isoformat() if git_sync.next_tick_at() else None,
+            "github_paused_until": github.reset_iso(),
+            "github_remaining": github.remaining(),
+        },
+    )
     await git_sync.run_due_accounts()
 
 

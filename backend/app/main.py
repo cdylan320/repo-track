@@ -37,9 +37,17 @@ def _migrate() -> None:
                 conn.execute(text("ALTER TABLE repos ADD COLUMN pushed_at VARCHAR(64) DEFAULT ''"))
             if "mirrored" not in cols:
                 conn.execute(text("ALTER TABLE repos ADD COLUMN mirrored BOOLEAN DEFAULT 0"))
+            if "reauthored" not in cols:
+                conn.execute(text("ALTER TABLE repos ADD COLUMN reauthored BOOLEAN DEFAULT 0"))
             conn.commit()
     with engine.connect() as conn:
         conn.execute(text("UPDATE accounts SET status = 'idle' WHERE status = 'syncing'"))
+        conn.execute(
+            text(
+                "UPDATE accounts SET status = 'idle', last_error = '' "
+                "WHERE status = 'error' AND last_error LIKE '%rate limit%'"
+            )
+        )
         conn.commit()
 
 

@@ -52,6 +52,7 @@ class Repo(Base):
     last_sha: Mapped[str] = mapped_column(String(64), default="")
     pushed_at: Mapped[str] = mapped_column(String(64), default="")
     mirrored: Mapped[bool] = mapped_column(Boolean, default=False)
+    reauthored: Mapped[bool] = mapped_column(Boolean, default=False)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(32), default="idle")

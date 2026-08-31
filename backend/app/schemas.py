@@ -106,6 +106,8 @@ class CommitOut(BaseModel):
     synced_at: datetime
     origin_label: str = ""
     dest_label: str = ""
+    origin_url: str = ""
+    dest_url: str = ""
     repo_name: str = ""
     account_name: str = ""
 
@@ -146,6 +148,8 @@ class OverviewOut(BaseModel):
     git_token_configured: bool
     worker_running: bool
     next_tick_at: datetime | None = None
+    github_paused_until: datetime | None = None
+    github_remaining: int | None = None
 
 
 class SettingsOut(BaseModel):

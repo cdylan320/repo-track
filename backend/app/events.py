@@ -37,10 +37,15 @@ bus = EventBus()
 
 
 def _hello_data() -> dict[str, Any]:
+    from . import github
     from .services import git_sync
 
     nxt = git_sync.next_tick_at()
-    return {"next_tick_at": nxt.isoformat() if nxt else None}
+    return {
+        "next_tick_at": nxt.isoformat() if nxt else None,
+        "github_paused_until": github.reset_iso(),
+        "github_remaining": github.remaining(),
+    }
 
 
 async def sse_stream(request: Request) -> StreamingResponse:

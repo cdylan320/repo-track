@@ -39,7 +39,7 @@ class Settings(BaseSettings):
 
     @property
     def dest_token(self) -> str:
-        return (self.dest_github_token or self.origin_token).strip()
+        return self.dest_github_token.strip()
 
     @property
     def dest_account(self) -> str:
@@ -47,7 +47,7 @@ class Settings(BaseSettings):
 
     @property
     def api_token(self) -> str:
-        return self.origin_token or self.dest_token
+        return self.origin_token
 
 
 settings = Settings()
