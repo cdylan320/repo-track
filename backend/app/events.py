@@ -37,14 +37,25 @@ bus = EventBus()
 
 
 def _hello_data() -> dict[str, Any]:
-    from . import github
-    from .services import git_sync
+    from .. import github
+    from ..database import SessionLocal
+    from ..models import Account
+    from ..services import git_sync
+    from ..services.rate_alerts import bucket_payload
 
     nxt = git_sync.next_tick_at()
+    db = SessionLocal()
+    try:
+        accounts = db.query(Account).order_by(Account.id.asc()).all()
+        buckets, limited = bucket_payload(accounts)
+    finally:
+        db.close()
     return {
         "next_tick_at": nxt.isoformat() if nxt else None,
         "github_paused_until": github.reset_iso(),
         "github_remaining": github.remaining(),
+        "rate_limited_count": limited,
+        "github_buckets": buckets,
     }
 
 

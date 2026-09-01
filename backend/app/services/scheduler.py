@@ -6,9 +6,11 @@ from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from ..config import settings
+from ..database import SessionLocal
 from ..events import bus
 from .. import github
 from . import git_sync
+from .rate_alerts import bucket_payload, log_poll_cycle
 
 log = logging.getLogger("relay.scheduler")
 scheduler = AsyncIOScheduler()
@@ -16,12 +18,32 @@ scheduler = AsyncIOScheduler()
 
 async def _tick() -> None:
     git_sync.set_next_tick(datetime.now(timezone.utc) + timedelta(seconds=settings.poll_interval_seconds))
+    db = SessionLocal()
+    accounts = []
+    buckets: list[dict] = []
+    limited = 0
+    api_remaining = github.remaining()
+    try:
+        from ..models import Account
+
+        accounts = db.query(Account).order_by(Account.id.asc()).all()
+        buckets, limited = bucket_payload(accounts)
+        api_remaining = github.remaining()
+    finally:
+        db.close()
+    log_poll_cycle(
+        account_count=len(accounts),
+        rate_limited_count=limited if accounts else 0,
+        api_remaining=api_remaining,
+    )
     await bus.publish(
         "tick",
         {
             "next_tick_at": git_sync.next_tick_at().isoformat() if git_sync.next_tick_at() else None,
             "github_paused_until": github.reset_iso(),
-            "github_remaining": github.remaining(),
+            "github_remaining": api_remaining,
+            "rate_limited_count": limited if accounts else 0,
+            "github_buckets": buckets if accounts else [],
         },
     )
     await git_sync.run_due_accounts()

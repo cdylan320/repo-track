@@ -18,7 +18,7 @@ from ..events import bus
 from ..gitutil import inject_token
 from ..models import Account, Commit, Event, Repo, utcnow
 from ..tokens import next_dest_token, poll_token_for_account, token_hint
-from . import discord
+from . import discord, rate_alerts
 
 log = logging.getLogger("relay.sync")
 
@@ -601,10 +601,20 @@ def sync_account_now(db: Session, account: Account) -> dict:
         }
     except github.GithubRateLimit as exc:
         live = db.get(Account, account.id)
+        rate_token = exc.token or poll_token_for_account(account)
+        resume = github.reset_iso(rate_token)
         if live:
             live.status = "idle"
             live.last_error = "GitHub rate limit — polling paused until reset"
+            _record_event(
+                db,
+                live,
+                "rate-limit",
+                f"GitHub rate limit — {live.origin_account} polling paused",
+                f"Token {token_hint(rate_token)} · resumes {resume or 'unknown'}",
+            )
             db.commit()
+        rate_alerts.log_rate_limit(account.origin_account, rate_token)
         return {
             "ok": True,
             "first": first_account,
@@ -614,7 +624,7 @@ def sync_account_now(db: Session, account: Account) -> dict:
             "repo_count": 0,
             "errors": [],
             "rate_limited": True,
-            "rate_token": exc.token or poll_token_for_account(account),
+            "rate_token": rate_token,
         }
     except Exception as exc:  # noqa: BLE001
         live = db.get(Account, account.id)
@@ -667,16 +677,18 @@ async def run_account(account_id: int) -> dict:
             await bus.publish("account", {"id": account.id, "status": account.status})
             if result.get("rate_limited"):
                 rate_token = result.get("rate_token") or poll_token_for_account(account)
-                await discord.notify_rate_limit(account, rate_token)
-                await bus.publish(
-                    "rate_limit",
-                    {
-                        "account_id": account.id,
-                        "origin": account.origin_account,
-                        "token_hint": token_hint(rate_token),
-                        "github_paused_until": github.reset_iso(rate_token),
-                        "github_remaining": github.remaining(rate_token),
-                    },
+                db2 = SessionLocal()
+                try:
+                    rows = db2.query(Account).order_by(Account.id.asc()).all()
+                    buckets, limited = rate_alerts.bucket_payload(rows)
+                finally:
+                    db2.close()
+                await rate_alerts.emit_rate_limit(
+                    account_id=account.id,
+                    origin=account.origin_account,
+                    token=rate_token,
+                    github_buckets=buckets,
+                    rate_limited_count=limited,
                 )
             elif not cancelled(account_id):
                 await discord.notify_digest(account, result)

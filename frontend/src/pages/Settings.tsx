@@ -116,7 +116,10 @@ export function SettingsPage() {
           </section>
           <section className="block">
             <h3>Discord</h3>
-            <p>Move alerts plus <strong>rate-limit warnings</strong> (once per token per 30 min).</p>
+            <p>
+              Every poll checks rate limits for <strong>all</strong> origins. The UI banner and sidebar update every
+              poll cycle. Discord/toast fire once when a limit first hits (not repeated every cycle while blocked).
+            </p>
             <div className="token">{settings?.discord_configured ? settings.discord_webhook_hint : 'not configured'}</div>
             <div style={{ marginTop: 16 }}>
               <button className="btn" type="button" onClick={ping} disabled={pinging || !settings?.discord_configured}>

@@ -111,7 +111,7 @@ export function relayDelayNote(
   const gapMs = relayed.getTime() - pushed.getTime()
   if (gapMs < 3600000) return null
   const hours = Math.round((gapMs / 3600000) * 10) / 10
-  return `Detected ${hours}h after push — polling was delayed (often GitHub rate limits).`
+  return `Relay was ${hours}h late detecting this — not a live alert. Often caused by earlier rate limits.`
 }
 
 export function todayLabel(): string {

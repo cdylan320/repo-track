@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from datetime import datetime, timezone
 from urllib.parse import quote, urlparse
@@ -11,6 +12,7 @@ from .config import settings
 from .tokens import bucket_key, next_dest_token, token_hint
 
 API = "https://api.github.com"
+log = logging.getLogger("relay.github")
 
 
 class GithubError(RuntimeError):
@@ -106,6 +108,11 @@ def _check_budget(token: str) -> None:
     key = _key_for_token(token)
     if time.time() < _state(key, authenticated=bool(token.strip()))["until"]:
         reset = reset_at(token)
+        log.warning(
+            "GitHub poll blocked — token=%s resumes=%s",
+            token_hint(token) or "public",
+            reset_iso(token) or "unknown",
+        )
         raise GithubRateLimit(
             "GitHub rate limit — polling paused until reset",
             token=token,
@@ -147,6 +154,12 @@ def _track(response: httpx.Response, token: str) -> None:
             state["until"] = reset_ts + 3
         else:
             state["until"] = time.time() + 120
+        log.warning(
+            "GitHub 403 rate limit — token=%s remaining=%s resumes=%s",
+            token_hint(token) or "public",
+            state["remaining"],
+            datetime.fromtimestamp(state["until"], tz=timezone.utc).isoformat(),
+        )
         raise GithubRateLimit(
             "GitHub rate limit — polling paused until reset",
             token=token,

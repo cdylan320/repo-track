@@ -69,10 +69,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       source.onmessage = (message) => {
         try {
           const payload = JSON.parse(message.data) as LiveEvent
-          const next = payload.data?.next_tick_at
-          const paused = payload.data?.github_paused_until
-          const remaining = payload.data?.github_remaining
-          if (typeof next === 'string' || typeof paused === 'string' || typeof remaining === 'number') {
+          const data = payload.data || {}
+          const next = data.next_tick_at
+          const paused = data.github_paused_until
+          const remaining = data.github_remaining
+          const limited = data.rate_limited_count
+          const buckets = data.github_buckets
+          if (
+            typeof next === 'string' ||
+            typeof paused === 'string' ||
+            typeof remaining === 'number' ||
+            typeof limited === 'number' ||
+            Array.isArray(buckets)
+          ) {
             setOverview((cur) =>
               cur
                 ? {
@@ -80,13 +89,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                     ...(typeof next === 'string' ? { next_tick_at: next } : {}),
                     ...(typeof paused === 'string' ? { github_paused_until: paused } : {}),
                     ...(typeof remaining === 'number' ? { github_remaining: remaining } : {}),
+                    ...(typeof limited === 'number' ? { rate_limited_count: limited } : {}),
+                    ...(Array.isArray(buckets) ? { github_buckets: buckets } : {}),
                   }
                 : cur,
             )
           }
           if (payload.event === 'rate_limit') {
-            const origin = String(payload.data?.origin || 'origin')
-            toast(`GitHub rate limit on ${origin}`, true)
+            if (data.new_episode === true) {
+              const origin = String(data.origin || 'origin')
+              toast(`Rate limit now — ${origin} polling paused`, true)
+            }
             void refresh()
             return
           }

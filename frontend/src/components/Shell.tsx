@@ -2,6 +2,7 @@ import { NavLink, Outlet } from 'react-router-dom'
 import { IconActivity, IconBoard, IconGear, IconRelays, Mark } from '../icons'
 import { countdown } from '../format'
 import { useStore } from '../store'
+import { RateLimitBanner } from './RateLimitBanner'
 
 const links = [
   { to: '/', label: 'Overview', icon: <IconBoard />, end: true },
@@ -63,6 +64,7 @@ export function Shell() {
         </div>
       </aside>
       <div className="canvas">
+        <RateLimitBanner />
         <nav className="mobile-nav">
           {links.map((link) => (
             <NavLink key={link.to} to={link.to} end={link.end} className={({ isActive }) => (isActive ? 'active' : '')}>

@@ -195,6 +195,16 @@ button {
   color: var(--warn);
 }
 
+.rate-banner {
+  margin: 0 0 0;
+  padding: 10px 20px;
+  background: rgba(255, 196, 90, 0.12);
+  border-bottom: 1px solid rgba(255, 196, 90, 0.35);
+  color: var(--warn);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 .dot {
   width: 7px;
   height: 7px;
