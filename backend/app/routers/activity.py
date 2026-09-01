@@ -8,8 +8,10 @@ from .. import github
 from ..config import settings
 from ..database import get_db
 from ..models import Account, Commit, Event, Repo
-from ..schemas import CommitOut, EventOut, OverviewOut
+from ..schemas import CommitOut, EventOut, GithubBucketOut, OverviewOut
 from ..services import git_sync
+from ..timeutil import parse_github_ts
+from ..tokens import bucket_key, poll_token_for_account, recommended_poll_seconds, unique_poll_token_count
 
 router = APIRouter(prefix="/api", tags=["activity"])
 
@@ -64,6 +66,10 @@ def new_repo_out(event: Event, account: Account | None, repo: Repo | None) -> Co
     repo_name = repo.name if repo else ""
     origin_label = f"{origin}/{repo_name}" if origin and repo_name else origin
     dest_label = f"{dest}/{repo_name}" if dest and repo_name else dest
+    pushed_at = parse_github_ts(repo.pushed_at if repo else None)
+    relayed_at = event.created_at
+    if relayed_at and relayed_at.tzinfo is None:
+        relayed_at = relayed_at.replace(tzinfo=timezone.utc)
     return CommitOut(
         kind="new-repo",
         id=event.id,
@@ -74,12 +80,12 @@ def new_repo_out(event: Event, account: Account | None, repo: Repo | None) -> Co
         message=event.message,
         author_name="",
         author_email="",
-        authored_at=event.created_at,
+        authored_at=pushed_at or relayed_at,
         files_changed=0,
         insertions=0,
         deletions=0,
         files_list="",
-        synced_at=event.created_at,
+        synced_at=relayed_at,
         origin_label=origin_label,
         dest_label=dest_label,
         origin_url=_web_url(repo.origin_url if repo else "", origin_label),
@@ -99,6 +105,17 @@ def overview(db: Session = Depends(get_db)):
     commits_today = db.query(func.count(Commit.id)).filter(Commit.synced_at >= start).scalar() or 0
     commits_total = db.query(func.count(Commit.id)).scalar() or 0
     last_sync = db.query(func.max(Account.last_sync_at)).scalar()
+    accounts = db.query(Account).order_by(Account.id.asc()).all()
+    labels: dict[str, list[str]] = {}
+    rate_limited = 0
+    for account in accounts:
+        token = poll_token_for_account(account)
+        key = bucket_key(token)
+        labels.setdefault(key, []).append(account.origin_account)
+        if github.is_blocked(token):
+            rate_limited += 1
+    buckets = [GithubBucketOut(**row) for row in github.bucket_summaries(labels)]
+    token_count = unique_poll_token_count(accounts) if accounts else max(1, len(settings.poll_tokens_list) or (1 if settings.dest_token else 0))
     return OverviewOut(
         account_count=account_count,
         pair_count=account_count,
@@ -121,6 +138,10 @@ def overview(db: Session = Depends(get_db)):
             datetime.fromtimestamp(github.reset_at(), tz=timezone.utc) if github.reset_at() else None
         ),
         github_remaining=github.remaining(),
+        poll_auth=github.poll_auth(),
+        github_buckets=buckets,
+        recommended_poll_seconds=recommended_poll_seconds(account_count, token_count),
+        rate_limited_count=rate_limited,
     )
 
 
@@ -156,8 +177,11 @@ def activity(
         out = commit_out(row, accounts.get(row.account_id), repos.get(row.repo_id))
         items.append((row.synced_at, row.id, "commit", out))
     for row in events:
-        out = new_repo_out(row, accounts.get(row.account_id) if row.account_id else None, repos.get(row.repo_id) if row.repo_id else None)
-        items.append((row.created_at, row.id, "new-repo", out))
+        repo = repos.get(row.repo_id) if row.repo_id else None
+        out = new_repo_out(row, accounts.get(row.account_id) if row.account_id else None, repo)
+        pushed = parse_github_ts(repo.pushed_at if repo else None)
+        sort_at = pushed or row.created_at
+        items.append((sort_at, row.id, "new-repo", out))
     items.sort(key=lambda item: (_sort_ts(item[0]), item[1]), reverse=True)
     return [item[3] for item in items[:limit]]
 

@@ -47,10 +47,20 @@ export function firstLine(message: string): string {
   return (message || '').split('\n')[0] || '—'
 }
 
+export function parseInstant(iso: string | null | undefined): Date | null {
+  if (!iso) return null
+  const raw = iso.trim()
+  if (!raw) return null
+  const hasTz = /[zZ]$|[+-]\d{2}:\d{2}$/.test(raw)
+  const date = new Date(hasTz ? raw : `${raw}Z`)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
 export function relativeTime(iso: string | null | undefined, now = Date.now()): string {
   if (!iso) return 'never'
-  const then = new Date(iso).getTime()
-  if (Number.isNaN(then)) return '—'
+  const date = parseInstant(iso)
+  if (!date) return '—'
+  const then = date.getTime()
   const seconds = Math.round((now - then) / 1000)
   const abs = Math.abs(seconds)
   if (abs < 10) return seconds >= 0 ? 'just now' : 'soon'
@@ -65,8 +75,9 @@ export function relativeTime(iso: string | null | undefined, now = Date.now()): 
 
 export function countdown(iso: string | null | undefined, now = Date.now()): string {
   if (!iso) return '—'
-  const then = new Date(iso).getTime()
-  if (Number.isNaN(then)) return '—'
+  const date = parseInstant(iso)
+  if (!date) return '—'
+  const then = date.getTime()
   const remaining = Math.ceil((then - now) / 1000)
   if (remaining <= 0) return 'now'
   if (remaining < 60) return `in ${remaining}s`
@@ -78,15 +89,29 @@ export function countdown(iso: string | null | undefined, now = Date.now()): str
 }
 
 export function clockTime(iso: string | null | undefined): string {
-  if (!iso) return ''
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return ''
+  const date = parseInstant(iso)
+  if (!date) return ''
   return date.toLocaleString(undefined, {
     month: 'short',
     day: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
+    timeZoneName: 'short',
   })
+}
+
+/** When relay lagged push by ≥1h, return a short note for the activity feed. */
+export function relayDelayNote(
+  pushedIso: string | null | undefined,
+  relayedIso: string | null | undefined,
+): string | null {
+  const pushed = parseInstant(pushedIso)
+  const relayed = parseInstant(relayedIso)
+  if (!pushed || !relayed) return null
+  const gapMs = relayed.getTime() - pushed.getTime()
+  if (gapMs < 3600000) return null
+  const hours = Math.round((gapMs / 3600000) * 10) / 10
+  return `Detected ${hours}h after push — polling was delayed (often GitHub rate limits).`
 }
 
 export function todayLabel(): string {

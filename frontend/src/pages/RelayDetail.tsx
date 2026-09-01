@@ -5,7 +5,7 @@ import { CommitFeed } from '../components/CommitFeed'
 import { Confirm } from '../components/Confirm'
 import { Conduit, StatusTag } from '../components/PairVisual'
 import { RelayDrawer } from '../components/RelayDrawer'
-import { clockTime, relativeTime } from '../format'
+import { clockTime, countdown, relativeTime } from '../format'
 import { useStore } from '../store'
 import type { Account, AccountDraft, CommitItem, LogItem, RepoItem } from '../types'
 
@@ -102,7 +102,20 @@ export function RelayDetailPage() {
             <p className="lede">
               → {account.dest_account} · {account.repo_count} repos · last pulse {relativeTime(account.last_sync_at, now)}
               {account.last_sync_at ? ` · ${clockTime(account.last_sync_at)}` : ''}
+              {account.poll_token_hint ? (
+                <>
+                  {' '}
+                  · poll token <span className="mono">{account.poll_token_hint}</span>
+                </>
+              ) : null}
             </p>
+            {account.github_paused_until ? (
+              <p className="sub warn">
+                GitHub rate limited — resumes {countdown(account.github_paused_until, now)}
+              </p>
+            ) : account.github_remaining != null && account.github_remaining < 300 ? (
+              <p className="sub warn">Poll token low: {account.github_remaining} API calls left this hour</p>
+            ) : null}
           </div>
           <div className="detail-actions">
             <button className="btn btn-signal" type="button" onClick={sync} disabled={busy}>

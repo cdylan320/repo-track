@@ -15,23 +15,6 @@ scheduler = AsyncIOScheduler()
 
 
 async def _tick() -> None:
-    if github.is_blocked():
-        reset = github.reset_at()
-        nxt = (
-            datetime.fromtimestamp(reset, tz=timezone.utc)
-            if reset
-            else datetime.now(timezone.utc) + timedelta(seconds=60)
-        )
-        git_sync.set_next_tick(nxt)
-        await bus.publish(
-            "tick",
-            {
-                "next_tick_at": nxt.isoformat(),
-                "github_paused_until": github.reset_iso(),
-                "github_remaining": github.remaining(),
-            },
-        )
-        return
     git_sync.set_next_tick(datetime.now(timezone.utc) + timedelta(seconds=settings.poll_interval_seconds))
     await bus.publish(
         "tick",

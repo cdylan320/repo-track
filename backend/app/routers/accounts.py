@@ -10,6 +10,7 @@ from ..database import get_db
 from ..models import Account, Commit, Repo
 from ..schemas import AccountCreate, AccountOut, AccountUpdate, RepoOut
 from ..services import git_sync
+from ..tokens import assign_poll_token_index, poll_auth_for_account, poll_token_for_account, token_hint
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
@@ -30,6 +31,7 @@ def to_out(db: Session, account: Account, with_repos: bool = False) -> AccountOu
     synced = db.query(func.coalesce(func.sum(Repo.commits_synced), 0)).filter(Repo.account_id == account.id).scalar() or 0
     repo_count = db.query(func.count(Repo.id)).filter(Repo.account_id == account.id).scalar() or 0
     name = account.name or f"{account.origin_account} → {settings.dest_account}"
+    poll_token = poll_token_for_account(account)
     repos = []
     if with_repos:
         rows = db.query(Repo).filter(Repo.account_id == account.id).order_by(Repo.name.asc()).all()
@@ -51,6 +53,14 @@ def to_out(db: Session, account: Account, with_repos: bool = False) -> AccountOu
         repo_count=repo_count,
         commits_synced=int(synced),
         commits_today=today,
+        poll_token_hint=token_hint(poll_token),
+        poll_auth=poll_auth_for_account(account),
+        github_remaining=github.remaining(poll_token),
+        github_paused_until=(
+            datetime.fromtimestamp(github.reset_at(poll_token), tz=timezone.utc)
+            if github.reset_at(poll_token)
+            else None
+        ),
         repos=repos,
     )
 
@@ -70,16 +80,26 @@ def create_account(body: AccountCreate, background: BackgroundTasks, db: Session
     existing = db.query(Account).filter(Account.origin_account == body.origin_account).first()
     if existing:
         raise HTTPException(409, f"Already tracking {body.origin_account}")
+    probe_token = (
+        settings.poll_token_map_dict.get(body.origin_account.lower())
+        or (settings.poll_tokens_list[0] if settings.poll_tokens_list else settings.poll_token)
+    )
     try:
-        profile = github.account_profile(body.origin_account)
+        profile = github.account_profile(body.origin_account, probe_token or None)
     except github.GithubError as exc:
         raise HTTPException(400, str(exc)) from exc
+    existing_count = db.query(Account).count()
     account = Account(
         origin_account=body.origin_account,
         origin_kind=profile.get("type") or "User",
         name=body.name.strip(),
         sync_mode=body.sync_mode,
         include_forks=body.include_forks,
+        poll_token_index=(
+            None
+            if body.origin_account.lower() in settings.poll_token_map_dict
+            else assign_poll_token_index(existing_count)
+        ),
     )
     db.add(account)
     db.commit()
@@ -103,8 +123,9 @@ def update_account(account_id: int, body: AccountUpdate, db: Session = Depends(g
         raise HTTPException(404, "Account not found")
     data = body.model_dump(exclude_unset=True)
     if "origin_account" in data and data["origin_account"] != account.origin_account:
+        probe_token = poll_token_for_account(account)
         try:
-            profile = github.account_profile(data["origin_account"])
+            profile = github.account_profile(data["origin_account"], probe_token or None)
             data["origin_kind"] = profile.get("type") or "User"
         except github.GithubError as exc:
             raise HTTPException(400, str(exc)) from exc

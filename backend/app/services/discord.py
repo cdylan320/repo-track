@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import time
+
 import httpx
 
+from .. import github
 from ..config import settings
+from ..tokens import bucket_key, token_hint
 
 
 SIGNAL = 0xC8F24A
 FAULT = 0xFF6B5A
+WARN = 0xFFC45A
+_last_rate_alert: dict[str, float] = {}
 
 
 def webhook_hint(url: str) -> str:
@@ -64,7 +70,7 @@ async def notify_digest(account, result: dict) -> tuple[bool, str]:
     commit_groups: list = result.get("commit_groups") or []
     errors = result.get("errors") or []
     if errors and all("rate limit" in str(e).lower() for e in errors):
-        return True, "rate-limit quiet"
+        return True, "rate-limit folded"
     repo_count = result.get("repo_count") or 0
 
     if first and not errors:
@@ -151,6 +157,38 @@ async def notify_digest(account, result: dict) -> tuple[bool, str]:
                     "color": FAULT if errors and not commit_groups else SIGNAL,
                     "fields": fields[:25],
                     "footer": {"text": "Relay · only what moved"},
+                }
+            ],
+        }
+    )
+
+
+async def notify_rate_limit(account, token: str) -> tuple[bool, str]:
+    if not settings.discord_webhook_url.strip():
+        return False, "not configured"
+    key = bucket_key(token)
+    now = time.time()
+    if key in _last_rate_alert and now - _last_rate_alert[key] < 1800:
+        return True, "debounced"
+    _last_rate_alert[key] = now
+    dest = settings.dest_account or "dest"
+    origin = account.origin_account
+    reset = github.reset_iso(token)
+    remaining = github.remaining(token)
+    hint = token_hint(token) or "token"
+    resume = reset or "next hour"
+    return await send_discord(
+        {
+            "username": "Relay",
+            "embeds": [
+                {
+                    "title": f"GitHub rate limit · {origin}",
+                    "description": (
+                        f"Polling **`{origin}`** is paused until the limit resets.\n"
+                        f"Token `{hint}` · **{remaining}** calls left · resumes ~{resume}"
+                    ),
+                    "color": WARN,
+                    "footer": {"text": "Relay · add POLL_TOKENS per origin to spread load"},
                 }
             ],
         }

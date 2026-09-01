@@ -17,6 +17,7 @@ from ..database import SessionLocal
 from ..events import bus
 from ..gitutil import inject_token
 from ..models import Account, Commit, Event, Repo, utcnow
+from ..tokens import next_dest_token, poll_token_for_account, token_hint
 from . import discord
 
 log = logging.getLogger("relay.sync")
@@ -105,8 +106,10 @@ def _clean_err(err: str) -> str:
 def _ensure_clone(account: Account, repo: Repo) -> None:
     folder = clone_dir(account.id, repo.name)
     git_dir = folder / ".git"
-    origin = inject_token(repo.origin_url, settings.origin_token)
-    dest = inject_token(repo.dest_url, settings.dest_token)
+    poll_token = poll_token_for_account(account)
+    origin_git = settings.origin_token or poll_token
+    origin = inject_token(repo.origin_url, origin_git)
+    dest = inject_token(repo.dest_url, next_dest_token() or settings.dest_token)
 
     if not git_dir.exists():
         code, _, err = _run(["git", "clone", "--origin", "origin", origin, str(folder)])
@@ -309,7 +312,13 @@ def _is_sha(value: str) -> bool:
 
 
 def _baseline_repo(account: Account, repo: Repo, remote: dict) -> None:
-    sha = github.tip_sha(account.origin_account, repo.name, remote["default_branch"] or repo.default_branch)
+    poll_token = poll_token_for_account(account)
+    sha = github.tip_sha(
+        account.origin_account,
+        repo.name,
+        remote["default_branch"] or repo.default_branch,
+        token=poll_token,
+    )
     repo.last_sha = sha
     repo.pushed_at = remote.get("pushed_at") or repo.pushed_at
     repo.default_branch = remote.get("default_branch") or repo.default_branch
@@ -453,7 +462,13 @@ def sync_account_now(db: Session, account: Account) -> dict:
             except Exception:
                 log.exception("could not clear dest repo descriptions")
         first_account = db.query(Repo).filter(Repo.account_id == account.id).count() == 0
-        remotes = github.list_repos(account.origin_account, account.origin_kind, account.include_forks)
+        poll_token = poll_token_for_account(account)
+        remotes = github.list_repos(
+            account.origin_account,
+            account.origin_kind,
+            account.include_forks,
+            token=poll_token,
+        )
         for remote in remotes:
             if cancelled(account.id):
                 live = db.get(Account, account.id)
@@ -584,7 +599,7 @@ def sync_account_now(db: Session, account: Account) -> dict:
             "repo_count": len(remotes),
             "errors": errors,
         }
-    except github.GithubRateLimit:
+    except github.GithubRateLimit as exc:
         live = db.get(Account, account.id)
         if live:
             live.status = "idle"
@@ -599,6 +614,7 @@ def sync_account_now(db: Session, account: Account) -> dict:
             "repo_count": 0,
             "errors": [],
             "rate_limited": True,
+            "rate_token": exc.token or poll_token_for_account(account),
         }
     except Exception as exc:  # noqa: BLE001
         live = db.get(Account, account.id)
@@ -649,7 +665,20 @@ async def run_account(account_id: int) -> dict:
             if not account:
                 return {"ok": True, "count": 0}
             await bus.publish("account", {"id": account.id, "status": account.status})
-            if not cancelled(account_id) and not result.get("rate_limited"):
+            if result.get("rate_limited"):
+                rate_token = result.get("rate_token") or poll_token_for_account(account)
+                await discord.notify_rate_limit(account, rate_token)
+                await bus.publish(
+                    "rate_limit",
+                    {
+                        "account_id": account.id,
+                        "origin": account.origin_account,
+                        "token_hint": token_hint(rate_token),
+                        "github_paused_until": github.reset_iso(rate_token),
+                        "github_remaining": github.remaining(rate_token),
+                    },
+                )
+            elif not cancelled(account_id):
                 await discord.notify_digest(account, result)
             if result.get("count") or result.get("new_repos"):
                 await bus.publish("commits", {"account_id": account.id, "count": result.get("count", 0)})
@@ -664,8 +693,6 @@ async def run_account(account_id: int) -> dict:
 
 
 async def run_due_accounts() -> None:
-    if github.is_blocked("origin"):
-        return
     db = SessionLocal()
     try:
         ids = [row.id for row in db.query(Account).filter(Account.paused.is_(False)).order_by(Account.id.asc()).all()]

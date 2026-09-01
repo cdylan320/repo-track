@@ -3,6 +3,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field, field_validator
 
 from .github import parse_account
+from .timeutil import UtcDatetime, UtcDatetimeOpt
 
 
 class AccountCreate(BaseModel):
@@ -56,7 +57,7 @@ class RepoOut(BaseModel):
     last_sha: str
     pushed_at: str = ""
     mirrored: bool = False
-    last_sync_at: datetime | None
+    last_sync_at: UtcDatetimeOpt
     last_error: str
     status: str
     commits_synced: int
@@ -76,12 +77,16 @@ class AccountOut(BaseModel):
     paused: bool
     status: str
     last_error: str
-    last_sync_at: datetime | None
-    created_at: datetime
-    updated_at: datetime
+    last_sync_at: UtcDatetimeOpt
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
     repo_count: int = 0
     commits_synced: int = 0
     commits_today: int = 0
+    poll_token_hint: str = ""
+    poll_auth: str = "public"
+    github_remaining: int | None = None
+    github_paused_until: UtcDatetimeOpt = None
     repos: list[RepoOut] = []
 
     class Config:
@@ -98,12 +103,12 @@ class CommitOut(BaseModel):
     message: str
     author_name: str
     author_email: str
-    authored_at: datetime | None
+    authored_at: UtcDatetimeOpt
     files_changed: int
     insertions: int
     deletions: int
     files_list: str = ""
-    synced_at: datetime
+    synced_at: UtcDatetime
     origin_label: str = ""
     dest_label: str = ""
     origin_url: str = ""
@@ -122,12 +127,20 @@ class EventOut(BaseModel):
     kind: str
     message: str
     detail: str
-    created_at: datetime
+    created_at: UtcDatetime
     origin_label: str = ""
     dest_label: str = ""
 
     class Config:
         from_attributes = True
+
+
+class GithubBucketOut(BaseModel):
+    key: str
+    hint: str
+    remaining: int
+    paused_until: UtcDatetimeOpt = None
+    accounts: list[str] = []
 
 
 class OverviewOut(BaseModel):
@@ -139,7 +152,7 @@ class OverviewOut(BaseModel):
     repo_count: int
     commits_today: int
     commits_total: int
-    last_sync_at: datetime | None
+    last_sync_at: UtcDatetimeOpt
     poll_interval_seconds: int
     discord_configured: bool
     dest_account: str
@@ -147,9 +160,13 @@ class OverviewOut(BaseModel):
     origin_token_configured: bool
     git_token_configured: bool
     worker_running: bool
-    next_tick_at: datetime | None = None
-    github_paused_until: datetime | None = None
+    next_tick_at: UtcDatetimeOpt = None
+    github_paused_until: UtcDatetimeOpt = None
     github_remaining: int | None = None
+    poll_auth: str = "public"
+    github_buckets: list[GithubBucketOut] = []
+    recommended_poll_seconds: int = 10
+    rate_limited_count: int = 0
 
 
 class SettingsOut(BaseModel):
@@ -163,6 +180,14 @@ class SettingsOut(BaseModel):
     origin_token_hint: str
     git_token_configured: bool
     git_token_hint: str
+    poll_auth: str = "public"
+    github_remaining: int | None = None
+    github_paused_until: str | None = None
+    poll_tokens_configured: int = 0
+    poll_token_map_configured: int = 0
+    dest_tokens_configured: int = 0
+    recommended_poll_seconds: int = 10
+    github_buckets: list[GithubBucketOut] = []
 
 
 class SettingsUpdate(BaseModel):

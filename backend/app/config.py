@@ -22,6 +22,18 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("DEST_GITHUB_TOKEN", "Dest_GITHUB_TOKEN", "dest_github_token"),
     )
+    dest_github_tokens: str = Field(
+        default="",
+        validation_alias=AliasChoices("DEST_GITHUB_TOKENS", "dest_github_tokens"),
+    )
+    poll_tokens: str = Field(
+        default="",
+        validation_alias=AliasChoices("POLL_TOKENS", "poll_tokens"),
+    )
+    poll_token_map: str = Field(
+        default="",
+        validation_alias=AliasChoices("POLL_TOKEN_MAP", "poll_token_map"),
+    )
     dest_github_account: str = Field(
         default="",
         validation_alias=AliasChoices("DEST_GITHUB_ACCOUNT", "Dest_GITHUB_ACCOUNT", "dest_github_account"),
@@ -39,15 +51,63 @@ class Settings(BaseSettings):
 
     @property
     def dest_token(self) -> str:
-        return self.dest_github_token.strip()
+        tokens = self.dest_tokens_list
+        return tokens[0] if tokens else ""
+
+    @property
+    def dest_tokens_list(self) -> list[str]:
+        raw = self.dest_github_tokens.strip()
+        if raw:
+            return [t.strip() for t in raw.split(",") if t.strip()]
+        token = self.dest_github_token.strip()
+        return [token] if token else []
+
+    @property
+    def poll_tokens_list(self) -> list[str]:
+        raw = self.poll_tokens.strip()
+        if not raw:
+            return []
+        return [t.strip() for t in raw.split(",") if t.strip()]
+
+    @property
+    def poll_token_map_dict(self) -> dict[str, str]:
+        raw = self.poll_token_map.strip()
+        out: dict[str, str] = {}
+        if not raw:
+            return out
+        for part in raw.split(","):
+            piece = part.strip()
+            if ":" not in piece:
+                continue
+            login, token = piece.split(":", 1)
+            login = login.strip().lower()
+            token = token.strip()
+            if login and token:
+                out[login] = token
+        return out
 
     @property
     def dest_account(self) -> str:
         return self.dest_github_account.strip().strip("/")
 
     @property
+    def poll_token(self) -> str:
+        """Token for GitHub API reads (origin listing). Falls back to dest token for rate limits."""
+        return self.origin_token or self.dest_token
+
+    @property
+    def poll_auth(self) -> str:
+        if self.poll_tokens_list or self.poll_token_map_dict:
+            return "multi"
+        if self.origin_token:
+            return "origin"
+        if self.dest_token:
+            return "dest"
+        return "public"
+
+    @property
     def api_token(self) -> str:
-        return self.origin_token
+        return self.poll_token
 
 
 settings = Settings()

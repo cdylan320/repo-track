@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import type { CommitItem } from '../types'
-import { clockTime, firstLine, relativeTime } from '../format'
+import { clockTime, firstLine, relayDelayNote, relativeTime } from '../format'
 import { useStore } from '../store'
 
 function RepoLink({ href, title, children }: { href: string; title?: string; children: ReactNode }) {
@@ -70,6 +70,9 @@ export function CommitRow({ item, toPair }: { item: CommitItem; toPair?: boolean
           synced {clockTime(item.synced_at)}
           <RepoRefs item={item} />
         </div>
+        {relayDelayNote(item.authored_at, item.synced_at) ? (
+          <div className="relay-delay">{relayDelayNote(item.authored_at, item.synced_at)}</div>
+        ) : null}
       </div>
     </div>
   )
@@ -102,6 +105,7 @@ function RepoRefs({ item }: { item: CommitItem }) {
 function NewRepoRow({ item, toPair }: { item: CommitItem; toPair?: boolean }) {
   const { now } = useStore()
   const pair = item.origin_label.includes('/') && item.dest_label.includes('/')
+  const delayNote = relayDelayNote(item.authored_at, item.synced_at)
   return (
     <div className="commit">
       <div className="kind new-repo">new-repo</div>
@@ -124,7 +128,12 @@ function NewRepoRow({ item, toPair }: { item: CommitItem; toPair?: boolean }) {
         </div>
         <div className="sub">
           {item.repo_name ? <span className="mono">{item.repo_name} · </span> : null}
-          opened on dest · {relativeTime(item.authored_at || item.synced_at, now)}
+          pushed {relativeTime(item.authored_at, now)}
+          {item.synced_at && item.authored_at !== item.synced_at ? (
+            <> · relayed {relativeTime(item.synced_at, now)}</>
+          ) : (
+            <> · opened on dest</>
+          )}
           {toPair && item.account_id ? (
             <>
               {' · '}
@@ -132,7 +141,11 @@ function NewRepoRow({ item, toPair }: { item: CommitItem; toPair?: boolean }) {
             </>
           ) : null}
         </div>
-        <div className="sub muted">opened {clockTime(item.synced_at)}</div>
+        <div className="sub muted">
+          {item.authored_at ? <>pushed {clockTime(item.authored_at)}</> : null}
+          {item.synced_at ? <> · relayed {clockTime(item.synced_at)}</> : null}
+        </div>
+        {delayNote ? <div className="relay-delay">{delayNote}</div> : null}
       </div>
     </div>
   )

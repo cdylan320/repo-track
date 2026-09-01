@@ -8,6 +8,7 @@ import re
 import httpx
 
 from .config import settings
+from .tokens import bucket_key, next_dest_token, token_hint
 
 API = "https://api.github.com"
 
@@ -17,45 +18,106 @@ class GithubError(RuntimeError):
 
 
 class GithubRateLimit(GithubError):
-    pass
+    def __init__(self, message: str, *, token: str = "", reset_at: float | None = None) -> None:
+        super().__init__(message)
+        self.token = token
+        self.reset_at = reset_at
 
 
-_buckets = {
-    "origin": {"until": 0.0, "remaining": 60},
-    "dest": {"until": 0.0, "remaining": 5000},
-}
+_buckets: dict[str, dict] = {}
 _dest_known: set[str] = set()
 _list_cache: dict[str, tuple[str, list[dict]]] = {}
 
 
-def is_blocked(bucket: str = "origin") -> bool:
-    return time.time() < _buckets[bucket]["until"]
+def _state(key: str, *, authenticated: bool) -> dict:
+    if key not in _buckets:
+        _buckets[key] = {
+            "until": 0.0,
+            "remaining": 5000 if authenticated else 60,
+            "hint": token_hint(key) if key not in {"public"} else "public",
+        }
+    return _buckets[key]
 
 
-def remaining(bucket: str = "origin") -> int:
-    return int(_buckets[bucket]["remaining"])
+def _key_for_token(token: str) -> str:
+    return bucket_key(token)
 
 
-def reset_at(bucket: str = "origin") -> float | None:
-    if not is_blocked(bucket):
-        return None
-    return _buckets[bucket]["until"]
+def is_blocked(token: str = "") -> bool:
+    key = _key_for_token(token)
+    return time.time() < _state(key, authenticated=bool(token.strip()))["until"]
 
 
-def reset_iso(bucket: str = "origin") -> str | None:
-    at = reset_at(bucket)
+def remaining(token: str = "") -> int:
+    if token:
+        key = _key_for_token(token)
+        return int(_state(key, authenticated=bool(token.strip()))["remaining"])
+    if not _buckets:
+        return 5000 if settings.poll_token else 60
+    return min(int(state["remaining"]) for state in _buckets.values())
+
+
+def reset_at(token: str = "") -> float | None:
+    if token:
+        key = _key_for_token(token)
+        state = _state(key, authenticated=bool(token.strip()))
+        return state["until"] if time.time() < state["until"] else None
+    blocked = [state["until"] for state in _buckets.values() if time.time() < state["until"]]
+    return max(blocked) if blocked else None
+
+
+def reset_iso(token: str = "") -> str | None:
+    at = reset_at(token)
     if not at:
         return None
     return datetime.fromtimestamp(at, tz=timezone.utc).isoformat()
 
 
-def _check_budget(bucket: str = "origin") -> None:
-    if is_blocked(bucket):
-        raise GithubRateLimit("GitHub rate limit — polling paused until reset")
+def poll_auth() -> str:
+    return settings.poll_auth
 
 
-def _track(response: httpx.Response, bucket: str = "origin") -> None:
-    state = _buckets[bucket]
+def bucket_summaries(account_labels: dict[str, list[str]] | None = None) -> list[dict]:
+    account_labels = account_labels or {}
+    out: list[dict] = []
+    keys = set(_buckets) | set(account_labels)
+    if not keys:
+        key = _key_for_token(settings.poll_token)
+        keys = {key}
+    for key in sorted(keys):
+        authenticated = key != "public"
+        state = _state(key, authenticated=authenticated)
+        paused = time.time() < state["until"]
+        out.append(
+            {
+                "key": key[:8],
+                "hint": state.get("hint") or (key[:8] if key != "public" else "public"),
+                "remaining": int(state["remaining"]),
+                "paused_until": datetime.fromtimestamp(state["until"], tz=timezone.utc).isoformat()
+                if paused
+                else None,
+                "accounts": account_labels.get(key, []),
+            }
+        )
+    return out
+
+
+def _check_budget(token: str) -> None:
+    key = _key_for_token(token)
+    if time.time() < _state(key, authenticated=bool(token.strip()))["until"]:
+        reset = reset_at(token)
+        raise GithubRateLimit(
+            "GitHub rate limit — polling paused until reset",
+            token=token,
+            reset_at=reset,
+        )
+
+
+def _track(response: httpx.Response, token: str) -> None:
+    key = _key_for_token(token)
+    state = _state(key, authenticated=bool(token.strip()))
+    if token.strip():
+        state["hint"] = token_hint(token)
     rem = response.headers.get("x-ratelimit-remaining")
     reset = response.headers.get("x-ratelimit-reset")
     if rem is not None:
@@ -85,13 +147,17 @@ def _track(response: httpx.Response, bucket: str = "origin") -> None:
             state["until"] = reset_ts + 3
         else:
             state["until"] = time.time() + 120
-        raise GithubRateLimit("GitHub rate limit — polling paused until reset")
+        raise GithubRateLimit(
+            "GitHub rate limit — polling paused until reset",
+            token=token,
+            reset_at=state["until"],
+        )
     if int(state["remaining"]) == 0 and reset_ts:
         state["until"] = max(float(state["until"]), reset_ts)
 
 
-def _raise_for_status(response: httpx.Response, bucket: str = "origin") -> None:
-    _track(response, bucket)
+def _raise_for_status(response: httpx.Response, token: str) -> None:
+    _track(response, token)
     if response.status_code >= 400:
         raise GithubError(_err(response))
 
@@ -121,7 +187,7 @@ def dest_https(repo: str) -> str:
 
 
 def _headers(token: str | None = None) -> dict[str, str]:
-    token = (token if token is not None else settings.origin_token).strip()
+    token = (token if token is not None else settings.poll_token).strip()
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -144,10 +210,11 @@ def _next_link(link: str | None) -> str | None:
 
 
 def _get_json(path: str, token: str | None = None) -> tuple[object, httpx.Headers]:
-    _check_budget("origin")
+    token = (token if token is not None else settings.poll_token).strip()
+    _check_budget(token)
     with httpx.Client(timeout=30, headers=_headers(token), follow_redirects=True) as client:
         response = client.get(path if path.startswith("http") else f"{API}{path}")
-        _raise_for_status(response, "origin")
+        _raise_for_status(response, token)
         return response.json(), response.headers
 
 
@@ -160,8 +227,8 @@ def _err(response: httpx.Response) -> str:
     return f"GitHub {response.status_code}: {str(msg)[:400]}"
 
 
-def account_profile(login: str) -> dict:
-    data, _ = _get_json(f"/users/{login}")
+def account_profile(login: str, token: str | None = None) -> dict:
+    data, _ = _get_json(f"/users/{login}", token)
     if not isinstance(data, dict):
         raise GithubError("unexpected GitHub response")
     return data
@@ -171,11 +238,6 @@ _dest_identity: tuple[str, str] | None = None
 
 
 def dest_identity() -> tuple[str, str]:
-    """Git (name, email) that makes the dest account the author on GitHub.
-
-    The noreply address is what GitHub matches commits back to an account, so
-    relayed commits show up under the dest login instead of the origin author.
-    """
     global _dest_identity
     login = settings.dest_account
     if not login:
@@ -185,25 +247,26 @@ def dest_identity() -> tuple[str, str]:
     name = login
     email = f"{login}@users.noreply.github.com"
     try:
-        profile, _ = _get_json(f"/users/{login}", settings.dest_token or None)
+        profile, _ = _get_json(f"/users/{login}", next_dest_token() or settings.dest_token or None)
         if isinstance(profile, dict):
             name = (profile.get("name") or profile.get("login") or login).strip() or login
             user_id = profile.get("id")
             if user_id:
                 email = f"{user_id}+{login}@users.noreply.github.com"
-    except Exception:  # noqa: BLE001 - fall back to the id-less noreply form
+    except Exception:  # noqa: BLE001
         pass
     _dest_identity = (name, email)
     return _dest_identity
 
 
-def list_repos(login: str, kind: str, include_forks: bool) -> list[dict]:
-    _check_budget("origin")
+def list_repos(login: str, kind: str, include_forks: bool, token: str | None = None) -> list[dict]:
+    token = (token if token is not None else settings.poll_token).strip()
+    _check_budget(token)
     path = f"/orgs/{login}/repos" if kind == "Organization" else f"/users/{login}/repos"
     url = f"{API}{path}?per_page=100&type=all&sort=updated"
-    cache_key = f"{login}:{kind}:{include_forks}"
+    cache_key = f"{bucket_key(token)}:{login}:{kind}:{include_forks}"
     rows: list[dict] = []
-    headers = _headers()
+    headers = _headers(token)
     cached = _list_cache.get(cache_key)
     if cached:
         headers["If-None-Match"] = cached[0]
@@ -211,12 +274,12 @@ def list_repos(login: str, kind: str, include_forks: bool) -> list[dict]:
     with httpx.Client(timeout=30, headers=headers, follow_redirects=True) as client:
         first = True
         while url:
-            _check_budget("origin")
+            _check_budget(token)
             response = client.get(url)
             if first and response.status_code == 304 and cached:
-                _track(response, "origin")
+                _track(response, token)
                 return cached[1]
-            _raise_for_status(response, "origin")
+            _raise_for_status(response, token)
             chunk = response.json()
             if not isinstance(chunk, list):
                 raise GithubError("unexpected GitHub repo list")
@@ -252,29 +315,35 @@ def list_repos(login: str, kind: str, include_forks: bool) -> list[dict]:
     return out
 
 
-def tip_sha(owner: str, name: str, branch: str) -> str:
-    _check_budget("origin")
+def tip_sha(owner: str, name: str, branch: str, token: str | None = None) -> str:
+    token = (token if token is not None else settings.poll_token).strip()
+    _check_budget(token)
     ref = quote(branch or "main", safe="")
-    with httpx.Client(timeout=30, headers=_headers(), follow_redirects=True) as client:
+    with httpx.Client(timeout=30, headers=_headers(token), follow_redirects=True) as client:
         response = client.get(f"{API}/repos/{owner}/{name}/commits/{ref}")
         if response.status_code in {404, 409}:
-            _track(response, "origin")
+            _track(response, token)
             return ""
-        _raise_for_status(response, "origin")
+        _raise_for_status(response, token)
         data = response.json()
         if isinstance(data, dict):
             return str(data.get("sha") or "")
         return ""
 
 
+def _dest_api_token() -> str:
+    return next_dest_token() or settings.dest_token
+
+
 def ensure_dest_repo(name: str, private: bool, description: str = "") -> None:
-    if not settings.dest_token:
+    token = _dest_api_token()
+    if not token:
         raise GithubError("DEST_GITHUB_TOKEN is not set")
     if not settings.dest_account:
         raise GithubError("DEST_GITHUB_ACCOUNT is not set")
     if name in _dest_known:
         return
-    _check_budget("dest")
+    _check_budget(token)
     payload = {
         "name": name,
         "private": private,
@@ -285,10 +354,10 @@ def ensure_dest_repo(name: str, private: bool, description: str = "") -> None:
     }
     if description:
         payload["description"] = description
-    with httpx.Client(timeout=30, headers=_headers(settings.dest_token), follow_redirects=True) as client:
+    with httpx.Client(timeout=30, headers=_headers(token), follow_redirects=True) as client:
         existing = client.get(f"{API}/repos/{settings.dest_account}/{name}")
         if existing.status_code == 200:
-            _track(existing, "dest")
+            _track(existing, token)
             _dest_known.add(name)
             current = ((existing.json() or {}).get("description") or "").strip()
             if current.startswith("Relay of "):
@@ -296,39 +365,40 @@ def ensure_dest_repo(name: str, private: bool, description: str = "") -> None:
                     f"{API}/repos/{settings.dest_account}/{name}",
                     json={"description": description},
                 )
-                _track(patched, "dest")
+                _track(patched, token)
             return
         if existing.status_code not in {404, 301}:
-            _raise_for_status(existing, "dest")
+            _raise_for_status(existing, token)
         else:
-            _track(existing, "dest")
+            _track(existing, token)
         profile = client.get(f"{API}/users/{settings.dest_account}")
-        _raise_for_status(profile, "dest")
+        _raise_for_status(profile, token)
         kind = (profile.json() or {}).get("type") or "User"
         url = f"{API}/orgs/{settings.dest_account}/repos" if kind == "Organization" else f"{API}/user/repos"
         created = client.post(url, json=payload)
         if created.status_code in {201, 202}:
-            _track(created, "dest")
+            _track(created, token)
             _dest_known.add(name)
             return
         if created.status_code == 422:
-            _track(created, "dest")
+            _track(created, token)
             body = created.json() if created.headers.get("content-type", "").startswith("application/json") else {}
             errors = body.get("errors") or []
             if any("already exists" in str(e).lower() for e in errors) or "already exists" in str(body).lower():
                 _dest_known.add(name)
                 return
-        _raise_for_status(created, "dest")
+        _raise_for_status(created, token)
 
 
 def scrub_relay_descriptions() -> None:
-    if not settings.dest_token or not settings.dest_account:
+    token = _dest_api_token()
+    if not token or not settings.dest_account:
         return
-    if is_blocked("dest"):
+    if is_blocked(token):
         return
-    with httpx.Client(timeout=30, headers=_headers(settings.dest_token), follow_redirects=True) as client:
+    with httpx.Client(timeout=30, headers=_headers(token), follow_redirects=True) as client:
         profile = client.get(f"{API}/users/{settings.dest_account}")
-        _raise_for_status(profile, "dest")
+        _raise_for_status(profile, token)
         kind = (profile.json() or {}).get("type") or "User"
         url = (
             f"{API}/orgs/{settings.dest_account}/repos?per_page=100&type=all"
@@ -336,9 +406,9 @@ def scrub_relay_descriptions() -> None:
             else f"{API}/user/repos?per_page=100&affiliation=owner"
         )
         while url:
-            _check_budget("dest")
+            _check_budget(token)
             response = client.get(url)
-            _raise_for_status(response, "dest")
+            _raise_for_status(response, token)
             chunk = response.json()
             if not isinstance(chunk, list):
                 break
@@ -352,5 +422,5 @@ def scrub_relay_descriptions() -> None:
                         f"{API}/repos/{settings.dest_account}/{name}",
                         json={"description": ""},
                     )
-                    _track(patched, "dest")
+                    _track(patched, token)
             url = _next_link(response.headers.get("link"))

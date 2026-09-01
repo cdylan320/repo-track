@@ -43,6 +43,23 @@ export function Shell() {
               ? `GitHub pause ${countdown(overview.github_paused_until, now)}`
               : `next ${countdown(overview?.next_tick_at, now)}`}
           </div>
+          {overview?.github_remaining != null ? (
+            <div className={`pulse-row${overview.github_remaining < 200 ? ' warn' : ''}`}>
+              GitHub API {overview.github_remaining} left
+              {overview.poll_auth === 'multi'
+                ? ` · ${overview.github_buckets?.length || 1} token${(overview.github_buckets?.length || 1) === 1 ? '' : 's'}`
+                : overview.poll_auth === 'dest'
+                  ? ' · dest token'
+                  : overview.poll_auth === 'origin'
+                    ? ' · origin token'
+                    : ' · unauthenticated'}
+            </div>
+          ) : null}
+          {(overview?.rate_limited_count ?? 0) > 0 ? (
+            <div className="pulse-row warn">
+              {overview?.rate_limited_count} origin{(overview?.rate_limited_count ?? 0) === 1 ? '' : 's'} rate-limited
+            </div>
+          ) : null}
         </div>
       </aside>
       <div className="canvas">

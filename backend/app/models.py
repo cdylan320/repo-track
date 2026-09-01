@@ -26,6 +26,7 @@ class Account(Base):
     name: Mapped[str] = mapped_column(String(160), default="")
     sync_mode: Mapped[str] = mapped_column(String(32), default="ff-only")
     include_forks: Mapped[bool] = mapped_column(Boolean, default=False)
+    poll_token_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     paused: Mapped[bool] = mapped_column(default=False)
     status: Mapped[str] = mapped_column(String(32), default="idle")
     last_error: Mapped[str] = mapped_column(Text, default="")

@@ -1,3 +1,11 @@
+export type GithubBucket = {
+  key: string
+  hint: string
+  remaining: number
+  paused_until: string | null
+  accounts: string[]
+}
+
 export type Account = {
   id: number
   origin_account: string
@@ -15,6 +23,10 @@ export type Account = {
   repo_count: number
   commits_synced: number
   commits_today: number
+  poll_token_hint?: string
+  poll_auth?: string
+  github_remaining?: number | null
+  github_paused_until?: string | null
   repos: RepoItem[]
 }
 
@@ -99,6 +111,10 @@ export type Overview = {
   next_tick_at: string | null
   github_paused_until?: string | null
   github_remaining?: number | null
+  poll_auth?: string
+  github_buckets?: GithubBucket[]
+  recommended_poll_seconds?: number
+  rate_limited_count?: number
 }
 
 export type Settings = {
@@ -112,6 +128,14 @@ export type Settings = {
   origin_token_hint: string
   git_token_configured: boolean
   git_token_hint: string
+  poll_auth?: string
+  github_remaining?: number | null
+  github_paused_until?: string | null
+  poll_tokens_configured?: number
+  poll_token_map_configured?: number
+  dest_tokens_configured?: number
+  recommended_poll_seconds?: number
+  github_buckets?: GithubBucket[]
 }
 
 export type LiveEvent = {

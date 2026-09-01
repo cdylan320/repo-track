@@ -127,9 +127,14 @@ export function OverviewPage() {
             <div className="strip-s">poll {overview?.poll_interval_seconds ?? '—'}s</div>
           </div>
           <div className="strip-cell">
-            <div className="strip-k">Discord</div>
-            <div className="strip-v small">{overview?.discord_configured ? 'on' : 'off'}</div>
-            <div className="strip-s">{overview?.dest_token_configured ? 'dest token on' : 'no dest token'}</div>
+            <div className="strip-k">GitHub API</div>
+            <div className="strip-v small">
+              {overview?.github_remaining ?? '—'} left
+              {(overview?.rate_limited_count ?? 0) > 0 ? ` · ${overview?.rate_limited_count} paused` : ''}
+            </div>
+            <div className="strip-s">
+              rec. poll {overview?.recommended_poll_seconds ?? '—'}s · {overview?.poll_auth || '—'}
+            </div>
           </div>
         </div>
         <div className="board">

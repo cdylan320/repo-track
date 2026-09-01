@@ -40,6 +40,27 @@ def _migrate() -> None:
             if "reauthored" not in cols:
                 conn.execute(text("ALTER TABLE repos ADD COLUMN reauthored BOOLEAN DEFAULT 0"))
             conn.commit()
+    if "accounts" in inspector.get_table_names():
+        cols = {c["name"] for c in inspector.get_columns("accounts")}
+        with engine.connect() as conn:
+            if "poll_token_index" not in cols:
+                conn.execute(text("ALTER TABLE accounts ADD COLUMN poll_token_index INTEGER"))
+                conn.commit()
+    from .tokens import assign_poll_token_index
+
+    db = SessionLocal()
+    try:
+        pool = settings.poll_tokens_list
+        if pool:
+            rows = db.query(Account).order_by(Account.id.asc()).all()
+            for index, account in enumerate(rows):
+                if account.origin_account.lower() in settings.poll_token_map_dict:
+                    continue
+                if account.poll_token_index is None:
+                    account.poll_token_index = assign_poll_token_index(index)
+            db.commit()
+    finally:
+        db.close()
     with engine.connect() as conn:
         conn.execute(text("UPDATE accounts SET status = 'idle' WHERE status = 'syncing'"))
         conn.execute(

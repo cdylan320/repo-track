@@ -84,6 +84,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 : cur,
             )
           }
+          if (payload.event === 'rate_limit') {
+            const origin = String(payload.data?.origin || 'origin')
+            toast(`GitHub rate limit on ${origin}`, true)
+            void refresh()
+            return
+          }
           if (payload.event === 'hello' || payload.event === 'tick') return
           void refresh()
         } catch {
