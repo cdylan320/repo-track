@@ -138,11 +138,19 @@ function NewRepoRow({ item, toPair }: { item: CommitItem; toPair?: boolean }) {
   )
 }
 
-export function CommitFeed({ items, toPair }: { items: CommitItem[]; toPair?: boolean }) {
+export function CommitFeed({
+  items,
+  toPair,
+  emptyMessage,
+}: {
+  items: CommitItem[]
+  toPair?: boolean
+  emptyMessage?: string
+}) {
   if (!items.length) {
     return (
       <div className="empty">
-        <p className="muted">Nothing has moved yet.</p>
+        <p className="muted">{emptyMessage || 'Nothing has moved yet.'}</p>
       </div>
     )
   }
