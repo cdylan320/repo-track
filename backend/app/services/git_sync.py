@@ -407,9 +407,6 @@ def _baseline_repo(account: Account, repo: Repo, remote: dict) -> None:
 
 
 def _open_new_repo(account: Account, repo: Repo, remote: dict) -> str:
-    github.ensure_dest_repo(repo.name, repo.private, remote.get("description") or "")
-    repo.mirrored = True
-    repo.pushed_at = remote.get("pushed_at") or ""
     if not _origin_has_commits(remote):
         _mark_origin_waiting(repo, remote, account)
         return ""
@@ -421,6 +418,9 @@ def _open_new_repo(account: Account, repo: Repo, remote: dict) -> str:
     if not tip:
         _mark_origin_waiting(repo, remote, account)
         return ""
+    github.ensure_dest_repo(repo.name, repo.private, remote.get("description") or "")
+    repo.mirrored = True
+    repo.pushed_at = remote.get("pushed_at") or ""
     _checkout_branch(repo)
     _push_dest(account, repo)
     repo.last_sha = tip
@@ -570,21 +570,74 @@ def sync_account_now(db: Session, account: Account) -> dict:
                 if created:
                     repo.status = "syncing"
                     db.commit()
-                    _open_new_repo(account, repo, remote)
-                    _record_event(
-                        db,
-                        account,
-                        "new-repo",
-                        f"New repo {account.origin_account}/{repo.name} → {settings.dest_account}/{repo.name}",
-                        repo=repo,
-                    )
+                    tip = _open_new_repo(account, repo, remote)
+                    stored: list[Commit] = []
+                    if tip:
+                        for item in _log_range(repo, ["-n", "20", "HEAD"]):
+                            existing = (
+                                db.query(Commit)
+                                .filter(Commit.repo_id == repo.id, Commit.sha == item["sha"])
+                                .first()
+                            )
+                            if existing:
+                                continue
+                            row = Commit(account_id=account.id, repo_id=repo.id, **item)
+                            db.add(row)
+                            stored.append(row)
+                        repo.commits_synced = (repo.commits_synced or 0) + len(stored)
+                        _record_event(
+                            db,
+                            account,
+                            "new-repo",
+                            f"New repo {account.origin_account}/{repo.name} → {settings.dest_account}/{repo.name}",
+                            repo=repo,
+                        )
+                        new_repos.append(repo)
                     db.commit()
-                    new_repos.append(repo)
+                    for row in stored:
+                        db.refresh(row)
+                    if stored:
+                        commit_groups.append(
+                            {"name": repo.name, "branch": repo.default_branch, "commits": stored}
+                        )
+                        stored_total += len(stored)
                     continue
 
                 remote_pushed = remote.get("pushed_at") or ""
+                # Origin was empty when first seen; retry only when pushed_at moves (first real commit).
+                if repo.mirrored and not repo.last_sha and repo.reauthored:
+                    if remote_pushed and remote_pushed != repo.pushed_at:
+                        repo.status = "syncing"
+                        db.commit()
+                        tip = _open_new_repo(account, repo, remote)
+                        if tip:
+                            stored: list[Commit] = []
+                            for item in _log_range(repo, ["-n", "20", "HEAD"]):
+                                existing = (
+                                    db.query(Commit)
+                                    .filter(Commit.repo_id == repo.id, Commit.sha == item["sha"])
+                                    .first()
+                                )
+                                if existing:
+                                    continue
+                                row = Commit(account_id=account.id, repo_id=repo.id, **item)
+                                db.add(row)
+                                stored.append(row)
+                            repo.commits_synced = (repo.commits_synced or 0) + len(stored)
+                            db.commit()
+                            for row in stored:
+                                db.refresh(row)
+                            if stored:
+                                commit_groups.append(
+                                    {"name": repo.name, "branch": repo.default_branch, "commits": stored}
+                                )
+                                stored_total += len(stored)
+                    else:
+                        repo.status = "idle"
+                        db.commit()
+                    continue
                 # Dest shell exists but content never pushed (e.g. false empty detection).
-                if repo.mirrored and not repo.last_sha and remote_pushed:
+                if repo.mirrored and not repo.last_sha and remote_pushed and not repo.reauthored:
                     repo.status = "syncing"
                     db.commit()
                     tip = _open_new_repo(account, repo, remote)

@@ -103,7 +103,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             void refresh()
             return
           }
-          if (payload.event === 'hello' || payload.event === 'tick') return
+          if (payload.event === 'hello') return
           void refresh()
         } catch {
           /* ignore malformed frames */
