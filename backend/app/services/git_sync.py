@@ -193,11 +193,15 @@ def _log_range(repo: Repo, rev: str | list[str]) -> list[dict]:
 
 def _checkout_branch(repo: Repo) -> None:
     branch = repo.default_branch or "main"
+    if not _origin_tip(repo):
+        raise RuntimeError(f"branch '{branch}' not found on origin")
     code, _, err = _git(repo, ["checkout", "-B", f"relay/{branch}", f"origin/{branch}"])
     if code == 0:
         return
     for fallback in (branch, "main", "master"):
-        code, _, _ = _git(repo, ["checkout", "-B", f"relay/{fallback}", f"origin/{fallback}"])
+        if not fallback:
+            continue
+        code, _, err = _git(repo, ["checkout", "-B", f"relay/{fallback}", f"origin/{fallback}"])
         if code == 0:
             repo.default_branch = fallback
             return
@@ -311,6 +315,43 @@ def _is_sha(value: str) -> bool:
     return len(value) >= 7 and all(c in "0123456789abcdefABCDEF" for c in value)
 
 
+def _is_empty_origin_error(message: str) -> bool:
+    low = (message or "").lower()
+    return (
+        "not a commit" in low
+        or "cannot be created from it" in low
+        or "branch '" in low and "not found on origin" in low
+    )
+
+
+def _origin_tip(repo: Repo) -> str:
+    """Return origin tip SHA if default branch exists, else try main/master."""
+    branch = repo.default_branch or "main"
+    for candidate in (branch, "main", "master"):
+        code, tip, _ = _git(repo, ["rev-parse", f"origin/{candidate}"])
+        if code == 0 and tip:
+            if candidate != repo.default_branch:
+                repo.default_branch = candidate
+            return tip
+    return ""
+
+
+def _mark_origin_waiting(repo: Repo, remote: dict, account: Account) -> None:
+    """Origin repo exists but has no commits yet — skip quietly until it gets content."""
+    repo.last_sha = ""
+    repo.pushed_at = remote.get("pushed_at") or repo.pushed_at
+    repo.mirrored = True
+    repo.reauthored = True
+    repo.status = "idle"
+    repo.last_error = ""
+    repo.last_sync_at = utcnow()
+    log.info(
+        "waiting for commits — %s/%s has no branch to mirror yet",
+        account.origin_account,
+        repo.name,
+    )
+
+
 def _baseline_repo(account: Account, repo: Repo, remote: dict) -> None:
     poll_token = poll_token_for_account(account)
     sha = github.tip_sha(
@@ -332,23 +373,18 @@ def _open_new_repo(account: Account, repo: Repo, remote: dict) -> str:
     github.ensure_dest_repo(repo.name, repo.private, remote.get("description") or "")
     repo.mirrored = True
     repo.pushed_at = remote.get("pushed_at") or ""
-    if remote.get("empty"):
-        repo.last_sha = ""
-        repo.status = "idle"
-        repo.last_error = ""
-        repo.last_sync_at = utcnow()
+    if remote.get("empty") or remote.get("no_commits"):
+        _mark_origin_waiting(repo, remote, account)
         return ""
     _ensure_clone(account, repo)
     code, _, err = _git(repo, ["fetch", "origin", "--prune"])
     if code != 0:
         raise RuntimeError(_clean_err(err) or "git fetch origin failed")
-    _checkout_branch(repo)
-    code, tip, err = _git(repo, ["rev-parse", "HEAD"])
-    if code != 0 or not tip:
-        repo.last_sha = ""
-        repo.status = "idle"
-        repo.last_sync_at = utcnow()
+    tip = _origin_tip(repo)
+    if not tip:
+        _mark_origin_waiting(repo, remote, account)
         return ""
+    _checkout_branch(repo)
     _push_dest(account, repo)
     repo.last_sha = tip
     repo.status = "idle"
@@ -359,32 +395,41 @@ def _open_new_repo(account: Account, repo: Repo, remote: dict) -> str:
 
 def _reauthor_dest(account: Account, repo: Repo, remote: dict) -> None:
     """Re-push an already-mirrored repo so its dest history carries dest authorship."""
+    if remote.get("empty") or remote.get("no_commits"):
+        _mark_origin_waiting(repo, remote, account)
+        return
     github.ensure_dest_repo(repo.name, repo.private, remote.get("description") or "")
     _ensure_clone(account, repo)
     code, _, err = _git(repo, ["fetch", "origin", "--prune"])
     if code != 0:
         raise RuntimeError(_clean_err(err) or "git fetch origin failed")
-    _checkout_branch(repo)
-    code, tip, _err = _git(repo, ["rev-parse", "HEAD"])
-    if code != 0 or not tip:
-        repo.reauthored = True
+    tip = _origin_tip(repo)
+    if not tip:
+        _mark_origin_waiting(repo, remote, account)
         return
+    _checkout_branch(repo)
     _push_dest(account, repo)
+    repo.reauthored = True
+    repo.last_sha = tip
     repo.status = "idle"
     repo.last_error = ""
     repo.last_sync_at = utcnow()
 
 
 def _relay_new_commits(account: Account, repo: Repo, remote: dict) -> tuple[list[dict], str]:
+    if remote.get("empty") or remote.get("no_commits"):
+        _mark_origin_waiting(repo, remote, account)
+        return [], ""
     github.ensure_dest_repo(repo.name, repo.private, remote.get("description") or "")
     _ensure_clone(account, repo)
     code, _, err = _git(repo, ["fetch", "origin", "--prune"])
     if code != 0:
         raise RuntimeError(_clean_err(err) or "git fetch origin failed")
+    tip = _origin_tip(repo)
+    if not tip:
+        _mark_origin_waiting(repo, remote, account)
+        return [], ""
     _checkout_branch(repo)
-    code, tip, err = _git(repo, ["rev-parse", "HEAD"])
-    if code != 0 or not tip:
-        raise RuntimeError(_clean_err(err) or "could not resolve HEAD")
     if repo.last_sha and repo.last_sha == tip:
         repo.pushed_at = remote.get("pushed_at") or repo.pushed_at
         return [], tip
@@ -502,9 +547,16 @@ def sync_account_now(db: Session, account: Account) -> dict:
 
                 remote_pushed = remote.get("pushed_at") or ""
                 if repo.mirrored and not repo.reauthored:
+                    if remote.get("empty") or remote.get("no_commits"):
+                        _mark_origin_waiting(repo, remote, account)
+                        db.commit()
+                        continue
                     repo.status = "syncing"
                     db.commit()
                     _reauthor_dest(account, repo, remote)
+                    if repo.reauthored and not repo.last_sha:
+                        db.commit()
+                        continue
                     _record_event(
                         db,
                         account,
@@ -550,6 +602,16 @@ def sync_account_now(db: Session, account: Account) -> dict:
             except github.GithubRateLimit:
                 raise
             except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                if _is_empty_origin_error(msg):
+                    _mark_origin_waiting(repo, remote, account)
+                    db.commit()
+                    log.info(
+                        "empty origin skipped — %s/%s",
+                        account.origin_account,
+                        repo.name,
+                    )
+                    continue
                 repo.status = "error"
                 repo.last_error = str(exc)
                 repo.last_sync_at = utcnow()

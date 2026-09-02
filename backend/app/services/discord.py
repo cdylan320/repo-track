@@ -59,6 +59,15 @@ def _subject(message: str) -> str:
     return (message or "—").split("\n", 1)[0][:72]
 
 
+def _is_quiet_repo_error(message: str) -> bool:
+    low = (message or "").lower()
+    return (
+        "not a commit" in low
+        or "cannot be created from it" in low
+        or ("branch" in low and "not found on origin" in low)
+    )
+
+
 def _files_line(commit) -> str:
     names = (getattr(commit, "files_list", "") or "").split(", ")
     names = [n for n in names if n]
@@ -92,6 +101,8 @@ async def notify_digest(account, result: dict) -> tuple[bool, str]:
     errors = result.get("errors") or []
     if errors and all("rate limit" in str(e).lower() for e in errors):
         return True, "rate-limit folded"
+    if errors and all(_is_quiet_repo_error(str(e)) for e in errors):
+        return True, "empty-repo quiet"
     repo_count = result.get("repo_count") or 0
 
     if first and not errors:

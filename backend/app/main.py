@@ -69,6 +69,12 @@ def _migrate() -> None:
                 "WHERE status = 'error' AND last_error LIKE '%rate limit%'"
             )
         )
+        conn.execute(
+            text(
+                "UPDATE repos SET reauthored = 1, status = 'idle', last_error = '' "
+                "WHERE last_error LIKE '%not a commit%' OR last_error LIKE '%cannot be created from it%'"
+            )
+        )
         conn.commit()
 
 

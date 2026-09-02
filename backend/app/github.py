@@ -321,6 +321,7 @@ def list_repos(login: str, kind: str, include_forks: bool, token: str | None = N
                 "description": (item.get("description") or "")[:180],
                 "pushed_at": item.get("pushed_at") or "",
                 "empty": int(item.get("size") or 0) == 0,
+                "no_commits": not bool(item.get("pushed_at")),
             }
         )
     if etag:
