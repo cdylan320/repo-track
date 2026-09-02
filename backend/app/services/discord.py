@@ -6,7 +6,6 @@ from .. import github
 from ..config import settings
 from ..tokens import token_hint
 
-
 SIGNAL = 0xC8F24A
 FAULT = 0xFF6B5A
 WARN = 0xFFC45A
@@ -68,6 +67,15 @@ def _is_quiet_repo_error(message: str) -> bool:
     )
 
 
+def _is_transient_error_message(message: str) -> bool:
+    return github.is_transient_error(RuntimeError(message))
+
+
+def _is_push_lock_error_message(message: str) -> bool:
+    low = (message or "").lower()
+    return "cannot lock ref" in low or "reference already exists" in low
+
+
 def _files_line(commit) -> str:
     names = (getattr(commit, "files_list", "") or "").split(", ")
     names = [n for n in names if n]
@@ -99,10 +107,16 @@ async def notify_digest(account, result: dict) -> tuple[bool, str]:
     new_repos = result.get("new_repos") or []
     commit_groups: list = result.get("commit_groups") or []
     errors = result.get("errors") or []
+    if result.get("transient"):
+        return True, "transient quiet"
     if errors and all("rate limit" in str(e).lower() for e in errors):
         return True, "rate-limit folded"
     if errors and all(_is_quiet_repo_error(str(e)) for e in errors):
         return True, "empty-repo quiet"
+    if errors and all(
+        _is_transient_error_message(str(e)) or _is_push_lock_error_message(str(e)) for e in errors
+    ):
+        return True, "transient quiet"
     repo_count = result.get("repo_count") or 0
 
     if first and not errors:

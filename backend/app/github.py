@@ -26,6 +26,46 @@ class GithubRateLimit(GithubError):
         self.reset_at = reset_at
 
 
+_TRANSIENT_MARKERS = (
+    "disconnected without sending",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "timed out",
+    "timeout",
+    "temporary failure",
+    "502 bad gateway",
+    "503 service unavailable",
+    "504 gateway",
+    "server disconnected",
+    "read error",
+    "write error",
+    "broken pipe",
+    "eof occurred",
+)
+
+_HTTP_RETRIES = 4
+_HTTP_BACKOFF = (0.6, 1.2, 2.5)
+
+
+def is_transient_error(exc: BaseException) -> bool:
+    if isinstance(
+        exc,
+        (
+            httpx.RemoteProtocolError,
+            httpx.ConnectError,
+            httpx.ReadTimeout,
+            httpx.WriteTimeout,
+            httpx.PoolTimeout,
+            httpx.NetworkError,
+            httpx.CloseError,
+        ),
+    ):
+        return True
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _TRANSIENT_MARKERS)
+
+
 _buckets: dict[str, dict] = {}
 _dest_known: set[str] = set()
 _list_cache: dict[str, tuple[str, list[dict]]] = {}
@@ -222,11 +262,41 @@ def _next_link(link: str | None) -> str | None:
     return None
 
 
+def _http_request(client: httpx.Client, method: str, url: str, token: str, **kwargs) -> httpx.Response:
+    last: Exception | None = None
+    for attempt in range(_HTTP_RETRIES):
+        try:
+            return client.request(method, url, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if not is_transient_error(exc) or attempt >= _HTTP_RETRIES - 1:
+                raise
+            wait = _HTTP_BACKOFF[min(attempt, len(_HTTP_BACKOFF) - 1)]
+            log.warning(
+                "GitHub transient %s %s (retry %s/%s in %.1fs): %s",
+                method,
+                url[:80],
+                attempt + 1,
+                _HTTP_RETRIES,
+                wait,
+                exc,
+            )
+            time.sleep(wait)
+    if last:
+        raise last
+    raise GithubError("GitHub request failed")
+
+
 def _get_json(path: str, token: str | None = None) -> tuple[object, httpx.Headers]:
     token = (token if token is not None else settings.poll_token).strip()
     _check_budget(token)
     with httpx.Client(timeout=30, headers=_headers(token), follow_redirects=True) as client:
-        response = client.get(path if path.startswith("http") else f"{API}{path}")
+        response = _http_request(
+            client,
+            "GET",
+            path if path.startswith("http") else f"{API}{path}",
+            token,
+        )
         _raise_for_status(response, token)
         return response.json(), response.headers
 
@@ -288,7 +358,7 @@ def list_repos(login: str, kind: str, include_forks: bool, token: str | None = N
         first = True
         while url:
             _check_budget(token)
-            response = client.get(url)
+            response = _http_request(client, "GET", url, token)
             if first and response.status_code == 304 and cached:
                 _track(response, token)
                 return cached[1]
@@ -320,8 +390,6 @@ def list_repos(login: str, kind: str, include_forks: bool, token: str | None = N
                 "clone_url": item.get("clone_url") or origin_https(login, name),
                 "description": (item.get("description") or "")[:180],
                 "pushed_at": item.get("pushed_at") or "",
-                "empty": int(item.get("size") or 0) == 0,
-                "no_commits": not bool(item.get("pushed_at")),
             }
         )
     if etag:
@@ -334,7 +402,7 @@ def tip_sha(owner: str, name: str, branch: str, token: str | None = None) -> str
     _check_budget(token)
     ref = quote(branch or "main", safe="")
     with httpx.Client(timeout=30, headers=_headers(token), follow_redirects=True) as client:
-        response = client.get(f"{API}/repos/{owner}/{name}/commits/{ref}")
+        response = _http_request(client, "GET", f"{API}/repos/{owner}/{name}/commits/{ref}", token)
         if response.status_code in {404, 409}:
             _track(response, token)
             return ""
@@ -369,14 +437,19 @@ def ensure_dest_repo(name: str, private: bool, description: str = "") -> None:
     if description:
         payload["description"] = description
     with httpx.Client(timeout=30, headers=_headers(token), follow_redirects=True) as client:
-        existing = client.get(f"{API}/repos/{settings.dest_account}/{name}")
+        existing = _http_request(
+            client, "GET", f"{API}/repos/{settings.dest_account}/{name}", token
+        )
         if existing.status_code == 200:
             _track(existing, token)
             _dest_known.add(name)
             current = ((existing.json() or {}).get("description") or "").strip()
             if current.startswith("Relay of "):
-                patched = client.patch(
+                patched = _http_request(
+                    client,
+                    "PATCH",
                     f"{API}/repos/{settings.dest_account}/{name}",
+                    token,
                     json={"description": description},
                 )
                 _track(patched, token)
@@ -385,11 +458,11 @@ def ensure_dest_repo(name: str, private: bool, description: str = "") -> None:
             _raise_for_status(existing, token)
         else:
             _track(existing, token)
-        profile = client.get(f"{API}/users/{settings.dest_account}")
+        profile = _http_request(client, "GET", f"{API}/users/{settings.dest_account}", token)
         _raise_for_status(profile, token)
         kind = (profile.json() or {}).get("type") or "User"
         url = f"{API}/orgs/{settings.dest_account}/repos" if kind == "Organization" else f"{API}/user/repos"
-        created = client.post(url, json=payload)
+        created = _http_request(client, "POST", url, token, json=payload)
         if created.status_code in {201, 202}:
             _track(created, token)
             _dest_known.add(name)
@@ -411,7 +484,7 @@ def scrub_relay_descriptions() -> None:
     if is_blocked(token):
         return
     with httpx.Client(timeout=30, headers=_headers(token), follow_redirects=True) as client:
-        profile = client.get(f"{API}/users/{settings.dest_account}")
+        profile = _http_request(client, "GET", f"{API}/users/{settings.dest_account}", token)
         _raise_for_status(profile, token)
         kind = (profile.json() or {}).get("type") or "User"
         url = (
@@ -421,7 +494,7 @@ def scrub_relay_descriptions() -> None:
         )
         while url:
             _check_budget(token)
-            response = client.get(url)
+            response = _http_request(client, "GET", url, token)
             _raise_for_status(response, token)
             chunk = response.json()
             if not isinstance(chunk, list):
@@ -432,8 +505,11 @@ def scrub_relay_descriptions() -> None:
                 if name:
                     _dest_known.add(name)
                 if name and desc.startswith("Relay of "):
-                    patched = client.patch(
+                    patched = _http_request(
+                        client,
+                        "PATCH",
                         f"{API}/repos/{settings.dest_account}/{name}",
+                        token,
                         json={"description": ""},
                     )
                     _track(patched, token)

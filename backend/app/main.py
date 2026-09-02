@@ -71,8 +71,16 @@ def _migrate() -> None:
         )
         conn.execute(
             text(
-                "UPDATE repos SET reauthored = 1, status = 'idle', last_error = '' "
-                "WHERE last_error LIKE '%not a commit%' OR last_error LIKE '%cannot be created from it%'"
+                "UPDATE repos SET reauthored = 0, status = 'idle', last_error = '' "
+                "WHERE mirrored = 1 AND (last_sha IS NULL OR last_sha = '') "
+                "AND pushed_at IS NOT NULL AND pushed_at != ''"
+            )
+        )
+        conn.execute(
+            text(
+                "UPDATE repos SET status = 'idle', last_error = '' "
+                "WHERE last_error LIKE '%cannot lock ref%' "
+                "OR last_error LIKE '%reference already exists%'"
             )
         )
         conn.commit()

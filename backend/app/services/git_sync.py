@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -292,27 +293,59 @@ def _non_fast_forward(err: str) -> bool:
     return "non-fast-forward" in text or "fetch first" in text or "updates were rejected" in text
 
 
+def _push_lock_error(err: str) -> bool:
+    low = (err or "").lower()
+    return "cannot lock ref" in low or "reference already exists" in low
+
+
 def _push_dest(account: Account, repo: Repo) -> None:
     branch = repo.default_branch or "main"
     dest_ref = f"refs/heads/relay-dest/{branch}"
     _reauthor(repo, dest_ref)
     refspec = f"{dest_ref}:refs/heads/{branch}"
     forced = account.sync_mode == "force"
-    args = ["push", "--force", "dest", refspec] if forced else ["push", "dest", refspec]
-    code, _, err = _git(repo, args)
-    if code != 0 and not forced and _non_fast_forward(err):
-        # Re-authored history diverges from whatever was mirrored before it, so
-        # the first push after the switch has to replace the dest branch.
-        log.warning("dest branch %s/%s diverged — force pushing re-authored history", repo.account_id, repo.name)
-        code, _, err = _git(repo, ["push", "--force", "dest", refspec])
-    if code != 0:
-        raise RuntimeError(_clean_err(err) or "git push dest failed")
-    repo.reauthored = True
+    delays = (0.0, 1.0, 2.5)
+    last_err = ""
+    for attempt, delay in enumerate(delays):
+        if delay:
+            time.sleep(delay)
+        args = ["push", "--force", "dest", refspec] if forced else ["push", "dest", refspec]
+        code, _, err = _git(repo, args)
+        last_err = err
+        if code == 0:
+            repo.reauthored = True
+            return
+        if not forced and _non_fast_forward(err):
+            log.warning(
+                "dest branch %s/%s diverged — force pushing re-authored history",
+                repo.account_id,
+                repo.name,
+            )
+            code, _, err = _git(repo, ["push", "--force", "dest", refspec])
+            last_err = err
+            if code == 0:
+                repo.reauthored = True
+                return
+        if _push_lock_error(err) and attempt < len(delays) - 1:
+            log.warning(
+                "dest push lock on %s/%s (retry %s/%s)",
+                repo.account_id,
+                repo.name,
+                attempt + 1,
+                len(delays),
+            )
+            continue
+        break
+    raise RuntimeError(_clean_err(last_err) or "git push dest failed")
 
 
 def _is_sha(value: str) -> bool:
     value = (value or "").strip()
     return len(value) >= 7 and all(c in "0123456789abcdefABCDEF" for c in value)
+
+
+def _origin_has_commits(remote: dict) -> bool:
+    return bool((remote.get("pushed_at") or "").strip())
 
 
 def _is_empty_origin_error(message: str) -> bool:
@@ -322,6 +355,10 @@ def _is_empty_origin_error(message: str) -> bool:
         or "cannot be created from it" in low
         or "branch '" in low and "not found on origin" in low
     )
+
+
+def _is_push_lock_error(message: str) -> bool:
+    return _push_lock_error(message)
 
 
 def _origin_tip(repo: Repo) -> str:
@@ -373,7 +410,7 @@ def _open_new_repo(account: Account, repo: Repo, remote: dict) -> str:
     github.ensure_dest_repo(repo.name, repo.private, remote.get("description") or "")
     repo.mirrored = True
     repo.pushed_at = remote.get("pushed_at") or ""
-    if remote.get("empty") or remote.get("no_commits"):
+    if not _origin_has_commits(remote):
         _mark_origin_waiting(repo, remote, account)
         return ""
     _ensure_clone(account, repo)
@@ -395,7 +432,7 @@ def _open_new_repo(account: Account, repo: Repo, remote: dict) -> str:
 
 def _reauthor_dest(account: Account, repo: Repo, remote: dict) -> None:
     """Re-push an already-mirrored repo so its dest history carries dest authorship."""
-    if remote.get("empty") or remote.get("no_commits"):
+    if not _origin_has_commits(remote):
         _mark_origin_waiting(repo, remote, account)
         return
     github.ensure_dest_repo(repo.name, repo.private, remote.get("description") or "")
@@ -417,7 +454,7 @@ def _reauthor_dest(account: Account, repo: Repo, remote: dict) -> None:
 
 
 def _relay_new_commits(account: Account, repo: Repo, remote: dict) -> tuple[list[dict], str]:
-    if remote.get("empty") or remote.get("no_commits"):
+    if not _origin_has_commits(remote):
         _mark_origin_waiting(repo, remote, account)
         return [], ""
     github.ensure_dest_repo(repo.name, repo.private, remote.get("description") or "")
@@ -546,8 +583,37 @@ def sync_account_now(db: Session, account: Account) -> dict:
                     continue
 
                 remote_pushed = remote.get("pushed_at") or ""
+                # Dest shell exists but content never pushed (e.g. false empty detection).
+                if repo.mirrored and not repo.last_sha and remote_pushed:
+                    repo.status = "syncing"
+                    db.commit()
+                    tip = _open_new_repo(account, repo, remote)
+                    if tip:
+                        stored: list[Commit] = []
+                        for item in _log_range(repo, ["-n", "20", "HEAD"]):
+                            existing = (
+                                db.query(Commit)
+                                .filter(Commit.repo_id == repo.id, Commit.sha == item["sha"])
+                                .first()
+                            )
+                            if existing:
+                                continue
+                            row = Commit(account_id=account.id, repo_id=repo.id, **item)
+                            db.add(row)
+                            stored.append(row)
+                        repo.commits_synced = (repo.commits_synced or 0) + len(stored)
+                        db.commit()
+                        for row in stored:
+                            db.refresh(row)
+                        if stored:
+                            commit_groups.append(
+                                {"name": repo.name, "branch": repo.default_branch, "commits": stored}
+                            )
+                            stored_total += len(stored)
+                    db.commit()
+                    continue
                 if repo.mirrored and not repo.reauthored:
-                    if remote.get("empty") or remote.get("no_commits"):
+                    if not _origin_has_commits(remote):
                         _mark_origin_waiting(repo, remote, account)
                         db.commit()
                         continue
@@ -557,6 +623,7 @@ def sync_account_now(db: Session, account: Account) -> dict:
                     if repo.reauthored and not repo.last_sha:
                         db.commit()
                         continue
+                    repo.pushed_at = remote_pushed or repo.pushed_at
                     _record_event(
                         db,
                         account,
@@ -565,6 +632,7 @@ def sync_account_now(db: Session, account: Account) -> dict:
                         repo=repo,
                     )
                     db.commit()
+                    continue
                 if repo.last_sha and not repo.pushed_at:
                     repo.pushed_at = remote_pushed
                     repo.status = "idle"
@@ -610,6 +678,18 @@ def sync_account_now(db: Session, account: Account) -> dict:
                         "empty origin skipped — %s/%s",
                         account.origin_account,
                         repo.name,
+                    )
+                    continue
+                if github.is_transient_error(exc) or _is_push_lock_error(msg):
+                    repo.status = "idle"
+                    repo.last_error = ""
+                    repo.last_sync_at = utcnow()
+                    db.commit()
+                    log.warning(
+                        "transient error — %s/%s: %s",
+                        account.origin_account,
+                        repo.name,
+                        exc,
                     )
                     continue
                 repo.status = "error"
@@ -701,6 +781,26 @@ def sync_account_now(db: Session, account: Account) -> dict:
                 "errors": [],
             }
         account = live
+        if github.is_transient_error(exc) or _is_push_lock_error(str(exc)):
+            account.status = "idle"
+            account.last_error = ""
+            account.last_sync_at = utcnow()
+            db.commit()
+            log.warning(
+                "transient GitHub/network error for %s (will retry next poll): %s",
+                account.origin_account,
+                exc,
+            )
+            return {
+                "ok": True,
+                "first": first_account,
+                "new_repos": [],
+                "commit_groups": [],
+                "count": 0,
+                "repo_count": 0,
+                "errors": [],
+                "transient": True,
+            }
         account.status = "error"
         account.last_error = str(exc)
         account.last_sync_at = utcnow()
@@ -752,7 +852,7 @@ async def run_account(account_id: int) -> dict:
                     github_buckets=buckets,
                     rate_limited_count=limited,
                 )
-            elif not cancelled(account_id):
+            elif not cancelled(account_id) and not result.get("transient"):
                 await discord.notify_digest(account, result)
             if result.get("count") or result.get("new_repos"):
                 await bus.publish("commits", {"account_id": account.id, "count": result.get("count", 0)})

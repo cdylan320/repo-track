@@ -179,9 +179,8 @@ def activity(
     for row in events:
         repo = repos.get(row.repo_id) if row.repo_id else None
         out = new_repo_out(row, accounts.get(row.account_id) if row.account_id else None, repo)
-        pushed = parse_github_ts(repo.pushed_at if repo else None)
-        sort_at = pushed or row.created_at
-        items.append((sort_at, row.id, "new-repo", out))
+        # Sort by when Relay mirrored it (synced_at), not origin pushed_at.
+        items.append((out.synced_at, row.id, "new-repo", out))
     items.sort(key=lambda item: (_sort_ts(item[0]), item[1]), reverse=True)
     return [item[3] for item in items[:limit]]
 
