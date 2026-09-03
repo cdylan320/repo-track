@@ -417,6 +417,21 @@ def _dest_api_token() -> str:
     return next_dest_token() or settings.dest_token
 
 
+def reset_dest_cache() -> None:
+    """Forget which dest repos exist and who the dest user is (after dest settings change)."""
+    global _dest_identity
+    _dest_known.clear()
+    _dest_identity = None
+
+
+def token_login(token: str) -> str:
+    """Login the given token authenticates as. Raises GithubError if GitHub rejects it."""
+    data, _ = _get_json("/user", token)
+    if not isinstance(data, dict) or not data.get("login"):
+        raise GithubError("token did not resolve to a GitHub user")
+    return str(data["login"])
+
+
 def ensure_dest_repo(name: str, private: bool, description: str = "") -> None:
     token = _dest_api_token()
     if not token:

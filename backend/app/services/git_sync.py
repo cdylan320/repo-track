@@ -5,9 +5,8 @@ import logging
 import os
 import shutil
 import subprocess
-import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -22,6 +21,9 @@ from ..tokens import next_dest_token, poll_token_for_account, token_hint
 from . import discord, rate_alerts
 
 log = logging.getLogger("relay.sync")
+
+#: The dest repo carries exactly one commit, and this is its message.
+DEST_COMMIT_MESSAGE = "initial commit"
 
 _locks: dict[int, asyncio.Lock] = {}
 _cancel: set[int] = set()
@@ -74,17 +76,18 @@ def clone_dir(account_id: int, repo_name: str | None = None) -> Path:
     return path
 
 
-def _run(cmd: list[str], cwd: Path | None = None) -> tuple[int, str, str]:
-    env = os.environ.copy()
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    env["GIT_ASKPASS"] = "echo"
+def _run(cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> tuple[int, str, str]:
+    child_env = os.environ.copy()
+    child_env["GIT_TERMINAL_PROMPT"] = "0"
+    child_env["GIT_ASKPASS"] = "echo"
+    child_env.update(env or {})
     result = subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
         timeout=settings.git_timeout_seconds,
-        env=env,
+        env=child_env,
     )
     return result.returncode, result.stdout.strip(), result.stderr.strip()
 
@@ -132,6 +135,24 @@ def _ensure_clone(account: Account, repo: Repo) -> None:
         _git(repo, ["remote", "set-url", "dest", dest])
 
 
+def _parse_authored(date_raw: str) -> datetime | None:
+    """Git's %aI carries the author's own UTC offset; store the instant in UTC.
+
+    SQLite drops tzinfo on write, so a `13:12-04:00` value would come back as a naive
+    13:12 and be read as UTC — four hours in the past, which the feed then reports as
+    a late relay. Converting here keeps the stored wall clock UTC like every other column.
+    """
+    if not date_raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(date_raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _parse_commits(raw: str) -> list[dict]:
     commits: list[dict] = []
     if not raw.strip():
@@ -144,7 +165,7 @@ def _parse_commits(raw: str) -> list[dict]:
         parts = header.split("\x1f")
         if len(parts) < 5:
             continue
-        sha, message, name, email, date_raw = parts[:5]
+        sha, _origin_message, name, email, date_raw = parts[:5]
         files = insertions = deletions = 0
         names: list[str] = []
         for line in stats.splitlines():
@@ -157,17 +178,14 @@ def _parse_commits(raw: str) -> list[dict]:
             if bits[1].isdigit():
                 deletions += int(bits[1])
             names.append(bits[2])
-        authored_at = None
-        if date_raw:
-            try:
-                authored_at = datetime.fromisoformat(date_raw)
-            except ValueError:
-                authored_at = None
+        authored_at = _parse_authored(date_raw)
         commits.append(
             {
                 "sha": sha,
                 "short_sha": sha[:7],
-                "message": message,
+                # What Relay actually pushed, not what origin wrote — dest only ever
+                # carries the one squashed commit, so the feed reports that message.
+                "message": DEST_COMMIT_MESSAGE,
                 "author_name": name,
                 "author_email": email,
                 "authored_at": authored_at,
@@ -209,88 +227,43 @@ def _checkout_branch(repo: Repo) -> None:
     raise RuntimeError(_clean_err(err) or f"branch '{branch}' not found on origin")
 
 
-def _rewrite_stream(src, out, name: bytes, email: bytes, dest_ref: bytes) -> None:
-    """Copy a fast-export stream, re-stamping author/committer as the dest account.
+def _squash_dest_commit(repo: Repo, dest_ref: str) -> None:
+    """Point dest_ref at a single root commit holding origin's current tree.
 
-    Dates are kept as-is so the rewrite is deterministic: the same origin history
-    always produces the same dest SHAs, which keeps ff-only pushes working.
+    The dest repo carries one commit, always titled `initial commit`, no matter how many
+    commits origin has: origin's history and messages never reach it. The commit takes the
+    origin tip's author date so the same tree always yields the same dest SHA, and it is
+    authored as the dest account.
     """
-    while True:
-        line = src.readline()
-        if not line:
-            return
-        if line.startswith(b"data "):
-            out.write(line)
-            size = int(line[5:].strip() or b"0")
-            while size > 0:
-                chunk = src.read(min(size, 1 << 20))
-                if not chunk:
-                    return
-                out.write(chunk)
-                size -= len(chunk)
-            continue
-        if line.startswith((b"commit ", b"reset ")):
-            keyword = line.split(b" ", 1)[0]
-            out.write(keyword + b" " + dest_ref + b"\n")
-            continue
-        if line.startswith((b"author ", b"committer ", b"tagger ")):
-            keyword, _, rest = line.rstrip(b"\n").partition(b" ")
-            _ident, sep, when = rest.rpartition(b"> ")
-            if sep:
-                out.write(keyword + b" " + name + b" <" + email + b"> " + when + b"\n")
-                continue
-        out.write(line)
-
-
-def _reauthor(repo: Repo, dest_ref: str) -> None:
-    """Rebuild HEAD's history under dest_ref with the dest account as author."""
     name, email = github.dest_identity()
-    folder = clone_dir(repo.account_id, repo.name)
-    env = os.environ.copy()
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    env["GIT_ASKPASS"] = "echo"
-    with tempfile.TemporaryFile() as export_err, tempfile.TemporaryFile() as import_err:
-        exporter = subprocess.Popen(
-            ["git", "fast-export", "--reencode=yes", "--signed-tags=strip", "HEAD"],
-            cwd=str(folder),
-            stdout=subprocess.PIPE,
-            stderr=export_err,
-            env=env,
-        )
-        importer = subprocess.Popen(
-            ["git", "fast-import", "--quiet", "--force"],
-            cwd=str(folder),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=import_err,
-            env=env,
-        )
-        try:
-            _rewrite_stream(
-                exporter.stdout,
-                importer.stdin,
-                name.encode("utf-8", "replace"),
-                email.encode("utf-8", "replace"),
-                dest_ref.encode(),
-            )
-        finally:
-            if importer.stdin:
-                importer.stdin.close()
-            if exporter.stdout:
-                exporter.stdout.close()
-            exporter.wait(timeout=settings.git_timeout_seconds)
-            importer.wait(timeout=settings.git_timeout_seconds)
-        if exporter.returncode != 0 or importer.returncode != 0:
-            failed = "fast-export" if exporter.returncode != 0 else "fast-import"
-            handle = export_err if exporter.returncode != 0 else import_err
-            handle.seek(0)
-            detail = _clean_err(handle.read().decode("utf-8", "replace").strip())
-            raise RuntimeError(detail or f"git {failed} failed")
 
+    code, tree, err = _git(repo, ["rev-parse", "HEAD^{tree}"])
+    if code != 0 or not tree:
+        raise RuntimeError(_clean_err(err) or "could not read the origin tree")
 
-def _non_fast_forward(err: str) -> bool:
-    text = (err or "").lower()
-    return "non-fast-forward" in text or "fetch first" in text or "updates were rejected" in text
+    code, when, err = _git(repo, ["log", "-1", "--pretty=format:%aI", "HEAD"])
+    if code != 0 or not when:
+        raise RuntimeError(_clean_err(err) or "could not read the origin tip date")
+
+    env = {
+        "GIT_AUTHOR_NAME": name,
+        "GIT_AUTHOR_EMAIL": email,
+        "GIT_AUTHOR_DATE": when,
+        "GIT_COMMITTER_NAME": name,
+        "GIT_COMMITTER_EMAIL": email,
+        "GIT_COMMITTER_DATE": when,
+    }
+    code, sha, err = _run(
+        ["git", "commit-tree", tree, "-m", DEST_COMMIT_MESSAGE],
+        cwd=clone_dir(repo.account_id, repo.name),
+        env=env,
+    )
+    if code != 0 or not sha:
+        raise RuntimeError(_clean_err(err) or "could not build the dest commit")
+
+    code, _, err = _git(repo, ["update-ref", dest_ref, sha])
+    if code != 0:
+        raise RuntimeError(_clean_err(err) or "could not update the dest ref")
 
 
 def _push_lock_error(err: str) -> bool:
@@ -298,34 +271,26 @@ def _push_lock_error(err: str) -> bool:
     return "cannot lock ref" in low or "reference already exists" in low
 
 
-def _push_dest(account: Account, repo: Repo) -> None:
+def _push_dest(repo: Repo) -> None:
+    """Replace the dest branch with the single `initial commit` for origin's current tree.
+
+    Always a force push: each sync builds a fresh root commit, so it never fast-forwards
+    over the one already there, so an account's ff-only sync_mode does not apply here.
+    """
     branch = repo.default_branch or "main"
     dest_ref = f"refs/heads/relay-dest/{branch}"
-    _reauthor(repo, dest_ref)
+    _squash_dest_commit(repo, dest_ref)
     refspec = f"{dest_ref}:refs/heads/{branch}"
-    forced = account.sync_mode == "force"
     delays = (0.0, 1.0, 2.5)
     last_err = ""
     for attempt, delay in enumerate(delays):
         if delay:
             time.sleep(delay)
-        args = ["push", "--force", "dest", refspec] if forced else ["push", "dest", refspec]
-        code, _, err = _git(repo, args)
+        code, _, err = _git(repo, ["push", "--force", "dest", refspec])
         last_err = err
         if code == 0:
             repo.reauthored = True
             return
-        if not forced and _non_fast_forward(err):
-            log.warning(
-                "dest branch %s/%s diverged — force pushing re-authored history",
-                repo.account_id,
-                repo.name,
-            )
-            code, _, err = _git(repo, ["push", "--force", "dest", refspec])
-            last_err = err
-            if code == 0:
-                repo.reauthored = True
-                return
         if _push_lock_error(err) and attempt < len(delays) - 1:
             log.warning(
                 "dest push lock on %s/%s (retry %s/%s)",
@@ -422,7 +387,7 @@ def _open_new_repo(account: Account, repo: Repo, remote: dict) -> str:
     repo.mirrored = True
     repo.pushed_at = remote.get("pushed_at") or ""
     _checkout_branch(repo)
-    _push_dest(account, repo)
+    _push_dest(repo)
     repo.last_sha = tip
     repo.status = "idle"
     repo.last_error = ""
@@ -445,7 +410,7 @@ def _reauthor_dest(account: Account, repo: Repo, remote: dict) -> None:
         _mark_origin_waiting(repo, remote, account)
         return
     _checkout_branch(repo)
-    _push_dest(account, repo)
+    _push_dest(repo)
     repo.reauthored = True
     repo.last_sha = tip
     repo.status = "idle"
@@ -478,7 +443,7 @@ def _relay_new_commits(account: Account, repo: Repo, remote: dict) -> tuple[list
         repo.last_sha = tip
         repo.pushed_at = remote.get("pushed_at") or repo.pushed_at
         return [], tip
-    _push_dest(account, repo)
+    _push_dest(repo)
     repo.mirrored = True
     repo.last_sha = tip
     repo.pushed_at = remote.get("pushed_at") or repo.pushed_at
@@ -486,6 +451,42 @@ def _relay_new_commits(account: Account, repo: Repo, remote: dict) -> tuple[list
     repo.last_error = ""
     repo.last_sync_at = utcnow()
     return commits, tip
+
+
+def repair_authored_dates(db: Session) -> int:
+    """Re-read author dates from the local clones for rows saved with the old tz bug.
+
+    Commits stored before %aI was normalised kept the author's local wall clock, so the
+    feed showed them hours in the past. Repos without a clone on disk are left alone.
+    """
+    fixed = 0
+    repos = db.query(Repo).join(Commit, Commit.repo_id == Repo.id).distinct().all()
+    for repo in repos:
+        folder = settings.clones_dir / str(repo.account_id) / repo.name
+        if not (folder / ".git").exists():
+            continue
+        code, out, _ = _run(["git", "log", "--all", "--pretty=format:%H %aI"], cwd=folder)
+        if code != 0 or not out.strip():
+            continue
+        dates = {}
+        for line in out.splitlines():
+            sha, _, iso = line.partition(" ")
+            parsed = _parse_authored(iso.strip())
+            if sha and parsed:
+                dates[sha] = parsed
+        for commit in db.query(Commit).filter(Commit.repo_id == repo.id).all():
+            correct = dates.get(commit.sha)
+            if not correct:
+                continue
+            current = commit.authored_at
+            if current is not None and current.tzinfo is None:
+                current = current.replace(tzinfo=timezone.utc)
+            if current != correct:
+                commit.authored_at = correct
+                fixed += 1
+    if fixed:
+        db.commit()
+    return fixed
 
 
 def _record_event(db: Session, account: Account | None, kind: str, message: str, detail: str = "", repo: Repo | None = None) -> None:

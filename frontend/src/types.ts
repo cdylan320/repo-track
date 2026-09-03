@@ -134,8 +134,15 @@ export type Settings = {
   poll_tokens_configured?: number
   poll_token_map_configured?: number
   dest_tokens_configured?: number
+  dest_token_hints?: string[]
   recommended_poll_seconds?: number
   github_buckets?: GithubBucket[]
+}
+
+export type SettingsDraft = {
+  poll_interval_seconds?: number
+  dest_account?: string
+  dest_token?: string
 }
 
 export type LiveEvent = {

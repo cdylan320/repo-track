@@ -13,7 +13,7 @@ from sqlalchemy import inspect, text
 from .config import settings, ROOT
 from .database import Base, SessionLocal, engine
 from .events import sse_stream
-from .models import Account, AppMeta
+from .models import Account, AppMeta, Commit
 from .routers import accounts, activity, settings as settings_router
 from .services import git_sync, scheduler
 
@@ -95,6 +95,23 @@ async def lifespan(_: FastAPI):
         row = db.get(AppMeta, "poll_interval_seconds")
         if row and row.value.isdigit():
             settings.poll_interval_seconds = max(2, int(row.value))
+        if not db.get(AppMeta, "authored_dates_utc"):
+            try:
+                fixed = git_sync.repair_authored_dates(db)
+                if fixed:
+                    logging.getLogger("relay").info("repaired %s commit author dates to UTC", fixed)
+            except Exception:  # noqa: BLE001
+                logging.getLogger("relay").warning("author-date repair skipped", exc_info=True)
+            db.add(AppMeta(key="authored_dates_utc", value="1"))
+            db.commit()
+        if not db.get(AppMeta, "dest_commit_message"):
+            # Rows predate the squashed dest push and still carry origin subjects; the feed
+            # reports what landed on dest, which is one `initial commit` per repo.
+            db.query(Commit).update(
+                {Commit.message: git_sync.DEST_COMMIT_MESSAGE}, synchronize_session=False
+            )
+            db.add(AppMeta(key="dest_commit_message", value="1"))
+            db.commit()
         keep = {row.id for row in db.query(Account.id).all()}
     finally:
         db.close()

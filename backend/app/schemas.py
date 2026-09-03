@@ -186,12 +186,35 @@ class SettingsOut(BaseModel):
     poll_tokens_configured: int = 0
     poll_token_map_configured: int = 0
     dest_tokens_configured: int = 0
+    dest_token_hints: list[str] = []
     recommended_poll_seconds: int = 10
     github_buckets: list[GithubBucketOut] = []
 
 
 class SettingsUpdate(BaseModel):
     poll_interval_seconds: int | None = Field(default=None, ge=2, le=3600)
+    dest_account: str | None = None
+    dest_token: str | None = None
+
+    @field_validator("dest_account")
+    @classmethod
+    def validate_dest_account(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        login = parse_account(value)
+        if not login:
+            raise ValueError("Destination GitHub account is required")
+        return login
+
+    @field_validator("dest_token")
+    @classmethod
+    def validate_dest_token(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        tokens = [t.strip() for t in value.split(",") if t.strip()]
+        if not tokens:
+            raise ValueError("Destination token is required")
+        return ",".join(tokens)
 
 
 class DiscordTestResult(BaseModel):

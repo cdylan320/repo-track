@@ -20,13 +20,15 @@ def _dest_tokens() -> list[str]:
     return [token] if token else []
 
 
-def _refresh_dest_cycle() -> None:
+def refresh_dest_cycle() -> None:
+    """Rebuild the dest-token round-robin after the tokens change."""
     global _dest_cycle
     tokens = _dest_tokens()
     _dest_cycle = itertools.cycle(tokens) if tokens else itertools.cycle([])
 
 
-_refresh_dest_cycle()
+_refresh_dest_cycle = refresh_dest_cycle
+refresh_dest_cycle()
 
 
 def bucket_key(token: str) -> str:

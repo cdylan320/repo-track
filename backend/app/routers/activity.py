@@ -185,6 +185,16 @@ def activity(
     return [item[3] for item in items[:limit]]
 
 
+@router.delete("/activity")
+def clear_activity(db: Session = Depends(get_db)):
+    """Wipe Activity feed history (commits + new-repo events). Does not untrack accounts or delete dest repos."""
+    commits_deleted = db.query(Commit).delete()
+    events_deleted = db.query(Event).filter(Event.kind == "new-repo").delete(synchronize_session=False)
+    db.query(Repo).update({Repo.commits_synced: 0}, synchronize_session=False)
+    db.commit()
+    return {"ok": True, "commits_deleted": commits_deleted, "events_deleted": events_deleted}
+
+
 @router.get("/logs", response_model=list[EventOut])
 def logs(
     account_id: int | None = None,

@@ -1,14 +1,21 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from .. import github
+from .. import envfile, github
 from ..config import settings
 from ..database import get_db
-from ..models import AppMeta, Account
+from ..models import AppMeta, Account, Event, Repo
 from ..schemas import DiscordTestResult, GithubBucketOut, SettingsOut, SettingsUpdate
 from ..services import discord, scheduler
 from ..services.discord import webhook_hint
-from ..tokens import bucket_key, poll_token_for_account, recommended_poll_seconds, token_hint, unique_poll_token_count
+from ..tokens import (
+    bucket_key,
+    poll_token_for_account,
+    recommended_poll_seconds,
+    refresh_dest_cycle,
+    token_hint,
+    unique_poll_token_count,
+)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -48,9 +55,66 @@ def get_settings(db: Session = Depends(get_db)):
         poll_tokens_configured=len(settings.poll_tokens_list),
         poll_token_map_configured=len(settings.poll_token_map_dict),
         dest_tokens_configured=len(settings.dest_tokens_list),
+        dest_token_hints=[_token_hint(t) for t in settings.dest_tokens_list],
         recommended_poll_seconds=recommended_poll_seconds(len(accounts), token_count),
         github_buckets=[GithubBucketOut(**row) for row in github.bucket_summaries(labels)],
     )
+
+
+def _apply_dest(body: SettingsUpdate, db: Session) -> None:
+    """Point the relay at a new destination account and/or token(s)."""
+    account = body.dest_account
+    tokens = [t.strip() for t in (body.dest_token or "").split(",") if t.strip()] if body.dest_token else []
+
+    if tokens:
+        for token in tokens:
+            try:
+                github.token_login(token)
+            except github.GithubError as exc:
+                raise HTTPException(400, f"Destination token rejected: {exc}") from exc
+
+    if account and account.lower() != settings.dest_account.lower():
+        probe = tokens[0] if tokens else settings.dest_token
+        try:
+            github.account_profile(account, probe or None)
+        except github.GithubError as exc:
+            raise HTTPException(400, f"Destination account {account}: {exc}") from exc
+
+    env: dict[str, str] = {}
+    if tokens:
+        settings.dest_github_token = tokens[0]
+        settings.dest_github_tokens = ",".join(tokens) if len(tokens) > 1 else ""
+        env["DEST_GITHUB_TOKEN"] = settings.dest_github_token
+        env["DEST_GITHUB_TOKENS"] = settings.dest_github_tokens
+        refresh_dest_cycle()
+
+    moved = bool(account) and account.lower() != settings.dest_account.lower()
+    previous = settings.dest_account
+    if account:
+        settings.dest_github_account = account
+        env["DEST_GITHUB_ACCOUNT"] = account
+
+    if env:
+        envfile.update(env)
+    github.reset_dest_cache()
+
+    if moved:
+        # The new account holds none of the mirrored history, so every repo has to be
+        # re-pushed there: repoint the dest URL and clear the per-repo sync state.
+        for repo in db.query(Repo).all():
+            repo.dest_url = github.dest_https(repo.name)
+            repo.last_sha = ""
+            repo.mirrored = False
+            repo.reauthored = False
+            repo.status = "idle"
+            repo.last_error = ""
+        db.add(
+            Event(
+                kind="settings",
+                message=f"Destination account changed {previous or 'unset'} → {account}",
+                detail="Repos will be re-mirrored to the new destination on the next poll.",
+            )
+        )
 
 
 @router.patch("", response_model=SettingsOut)
@@ -62,6 +126,9 @@ def update_settings(body: SettingsUpdate, db: Session = Depends(get_db)):
             row.value = str(body.poll_interval_seconds)
         else:
             db.add(AppMeta(key="poll_interval_seconds", value=str(body.poll_interval_seconds)))
+        db.commit()
+    if body.dest_account is not None or body.dest_token is not None:
+        _apply_dest(body, db)
         db.commit()
     return get_settings(db)
 

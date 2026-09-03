@@ -1,4 +1,4 @@
-import type { Account, AccountDraft, CommitItem, LogItem, Overview, Settings } from './types'
+import type { Account, AccountDraft, CommitItem, LogItem, Overview, Settings, SettingsDraft } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const { signal, headers, ...rest } = init ?? {}
@@ -36,13 +36,14 @@ export const api = {
   syncAll: () => request<{ ok: boolean }>('/api/accounts/sync-all', { method: 'POST' }),
   activity: (accountId?: number) =>
     request<CommitItem[]>(accountId ? `/api/activity?account_id=${accountId}` : '/api/activity'),
+  clearActivity: () =>
+    request<{ ok: boolean; commits_deleted: number; events_deleted: number }>('/api/activity', {
+      method: 'DELETE',
+    }),
   logs: (accountId?: number) =>
     request<LogItem[]>(accountId ? `/api/logs?account_id=${accountId}` : '/api/logs'),
   settings: () => request<Settings>('/api/settings'),
-  updateSettings: (poll_interval_seconds: number) =>
-    request<Settings>('/api/settings', {
-      method: 'PATCH',
-      body: JSON.stringify({ poll_interval_seconds }),
-    }),
+  updateSettings: (body: SettingsDraft) =>
+    request<Settings>('/api/settings', { method: 'PATCH', body: JSON.stringify(body) }),
   testDiscord: () => request<{ ok: boolean; message: string }>('/api/settings/discord-test', { method: 'POST' }),
 }
