@@ -29,7 +29,7 @@ _locks: dict[int, asyncio.Lock] = {}
 _cancel: set[int] = set()
 _running = False
 _next_tick: datetime | None = None
-_scrubbed_descriptions = False
+_dest_normalized = False
 
 
 def is_running() -> bool:
@@ -383,7 +383,7 @@ def _open_new_repo(account: Account, repo: Repo, remote: dict) -> str:
     if not tip:
         _mark_origin_waiting(repo, remote, account)
         return ""
-    github.ensure_dest_repo(repo.name, repo.private, remote.get("description") or "")
+    github.ensure_dest_repo(repo.name, remote.get("description") or "")
     repo.mirrored = True
     repo.pushed_at = remote.get("pushed_at") or ""
     _checkout_branch(repo)
@@ -400,7 +400,7 @@ def _reauthor_dest(account: Account, repo: Repo, remote: dict) -> None:
     if not _origin_has_commits(remote):
         _mark_origin_waiting(repo, remote, account)
         return
-    github.ensure_dest_repo(repo.name, repo.private, remote.get("description") or "")
+    github.ensure_dest_repo(repo.name, remote.get("description") or "")
     _ensure_clone(account, repo)
     code, _, err = _git(repo, ["fetch", "origin", "--prune"])
     if code != 0:
@@ -422,7 +422,7 @@ def _relay_new_commits(account: Account, repo: Repo, remote: dict) -> tuple[list
     if not _origin_has_commits(remote):
         _mark_origin_waiting(repo, remote, account)
         return [], ""
-    github.ensure_dest_repo(repo.name, repo.private, remote.get("description") or "")
+    github.ensure_dest_repo(repo.name, remote.get("description") or "")
     _ensure_clone(account, repo)
     code, _, err = _git(repo, ["fetch", "origin", "--prune"])
     if code != 0:
@@ -525,7 +525,7 @@ def _upsert_repo(db: Session, account: Account, remote: dict) -> tuple[Repo, boo
 
 
 def sync_account_now(db: Session, account: Account) -> dict:
-    global _scrubbed_descriptions
+    global _dest_normalized
     account.status = "syncing"
     account.last_error = ""
     db.commit()
@@ -538,12 +538,13 @@ def sync_account_now(db: Session, account: Account) -> dict:
 
     first_account = True
     try:
-        if not _scrubbed_descriptions:
+        if not _dest_normalized:
             try:
-                github.scrub_relay_descriptions()
-                _scrubbed_descriptions = True
+                managed = {name for (name,) in db.query(Repo.name).distinct().all()}
+                github.normalize_dest_repos(managed)
+                _dest_normalized = True
             except Exception:
-                log.exception("could not clear dest repo descriptions")
+                log.exception("could not normalize dest repos")
         first_account = db.query(Repo).filter(Repo.account_id == account.id).count() == 0
         poll_token = poll_token_for_account(account)
         remotes = github.list_repos(

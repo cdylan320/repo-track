@@ -157,7 +157,8 @@ export function RelayDetailPage() {
                       {repo.mirrored ? 'on dest' : 'watching'}
                       {' · '}
                       {repo.default_branch}
-                      {repo.private ? ' · private' : ' · public'} · {repo.commits_synced} relayed
+                      {` · origin ${repo.private ? 'private' : 'public'} · dest private`} ·{' '}
+                      {repo.commits_synced} relayed
                       {repo.last_sha ? ` · ${repo.last_sha.slice(0, 7)}` : ''}
                       {repo.status === 'error' ? ` · ${repo.last_error}` : ''}
                     </div>

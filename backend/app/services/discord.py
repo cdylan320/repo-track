@@ -168,8 +168,11 @@ async def notify_digest(account, result: dict) -> tuple[bool, str]:
     if new_repos:
         lines = []
         for repo in new_repos[:8]:
-            vis = "private" if repo.private else "public"
-            lines.append(f"`{origin}/{repo.name}`  →  `{dest}/{repo.name}`  ·  {vis} · `{repo.default_branch}`")
+            origin_vis = "private" if repo.private else "public"
+            lines.append(
+                f"`{origin}/{repo.name}` ({origin_vis})  →  `{dest}/{repo.name}` (private)"
+                f"  ·  `{repo.default_branch}`"
+            )
         if len(new_repos) > 8:
             lines.append(f"…{len(new_repos) - 8} more")
         fields.append({"name": "New on dest", "value": "\n".join(lines)[:1024]})

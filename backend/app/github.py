@@ -432,7 +432,8 @@ def token_login(token: str) -> str:
     return str(data["login"])
 
 
-def ensure_dest_repo(name: str, private: bool, description: str = "") -> None:
+def ensure_dest_repo(name: str, description: str = "") -> None:
+    """Make sure the dest repo exists and is private, whatever the origin's visibility is."""
     token = _dest_api_token()
     if not token:
         raise GithubError("DEST_GITHUB_TOKEN is not set")
@@ -443,7 +444,7 @@ def ensure_dest_repo(name: str, private: bool, description: str = "") -> None:
     _check_budget(token)
     payload = {
         "name": name,
-        "private": private,
+        "private": True,
         "has_issues": False,
         "has_projects": False,
         "has_wiki": False,
@@ -457,17 +458,27 @@ def ensure_dest_repo(name: str, private: bool, description: str = "") -> None:
         )
         if existing.status_code == 200:
             _track(existing, token)
-            _dest_known.add(name)
-            current = ((existing.json() or {}).get("description") or "").strip()
-            if current.startswith("Relay of "):
+            body = existing.json() or {}
+            patch: dict = {}
+            if not body.get("private"):
+                patch["private"] = True
+            if ((body.get("description") or "").strip()).startswith("Relay of "):
+                patch["description"] = description
+            if patch:
                 patched = _http_request(
                     client,
                     "PATCH",
                     f"{API}/repos/{settings.dest_account}/{name}",
                     token,
-                    json={"description": description},
+                    json=patch,
                 )
                 _track(patched, token)
+                if "private" in patch and patched.status_code >= 400:
+                    # Better to skip the push than to relay into a repo that stayed public.
+                    raise GithubError(
+                        f"could not make {settings.dest_account}/{name} private: {_err(patched)}"
+                    )
+            _dest_known.add(name)
             return
         if existing.status_code not in {404, 301}:
             _raise_for_status(existing, token)
@@ -492,7 +503,14 @@ def ensure_dest_repo(name: str, private: bool, description: str = "") -> None:
         _raise_for_status(created, token)
 
 
-def scrub_relay_descriptions() -> None:
+def normalize_dest_repos(managed: set[str]) -> None:
+    """One pass over the dest account: clear old Relay descriptions and force private.
+
+    `managed` is the set of repo names Relay mirrors. The listing also returns repos the
+    dest user owns that Relay never created, and their visibility is none of our business —
+    only names in `managed` are ever flipped. A repo is cached in `_dest_known` only once
+    it is actually private, so anything left public gets re-checked by ensure_dest_repo.
+    """
     token = _dest_api_token()
     if not token or not settings.dest_account:
         return
@@ -515,17 +533,36 @@ def scrub_relay_descriptions() -> None:
             if not isinstance(chunk, list):
                 break
             for item in chunk:
-                desc = (item.get("description") or "").strip()
                 name = item.get("name") or ""
-                if name:
-                    _dest_known.add(name)
-                if name and desc.startswith("Relay of "):
+                if not name:
+                    continue
+                desc = (item.get("description") or "").strip()
+                is_private = bool(item.get("private"))
+                patch: dict = {}
+                if name in managed and not is_private:
+                    patch["private"] = True
+                if desc.startswith("Relay of "):
+                    patch["description"] = ""
+                if patch:
                     patched = _http_request(
                         client,
                         "PATCH",
                         f"{API}/repos/{settings.dest_account}/{name}",
                         token,
-                        json={"description": ""},
+                        json=patch,
                     )
                     _track(patched, token)
+                    if "private" in patch:
+                        if patched.status_code >= 400:
+                            log.warning(
+                                "could not make %s/%s private: %s",
+                                settings.dest_account,
+                                name,
+                                _err(patched),
+                            )
+                        else:
+                            is_private = True
+                            log.info("made dest repo %s/%s private", settings.dest_account, name)
+                if is_private:
+                    _dest_known.add(name)
             url = _next_link(response.headers.get("link"))
